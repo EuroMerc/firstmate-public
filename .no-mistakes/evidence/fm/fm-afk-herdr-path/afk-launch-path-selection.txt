@@ -1,0 +1,17 @@
+=== Scenario B: launch-path selection is decided by the SUPERVISOR BACKEND, not the harness ===
+
+--- B1: backend WITHOUT native busy state (tmux): the harness-native in-pane path stays available ---
+$ FM_SUPERVISOR_BACKEND=tmux bin/fm-afk-launch.sh start-native
+[exit status] 0
+$ cat state/.afk-daemon-terminal   # 'none' = daemon hosted in-pane by the harness
+none	-	native
+
+--- B2: same request, backend WITH native busy state (herdr): start-native is redirected ---
+$ FM_SUPERVISOR_BACKEND=herdr bin/fm-afk-launch.sh start-native
+fm-afk-launch: backend 'herdr' reports native busy state; an in-pane daemon would read itself as 
+busy and defer every escalation, so launching it in a separate non-visible terminal instead
+fm-afk-launch: cannot derive herdr session from captain target 'captain-pane'
+[exit status] 1  (the redirected terminal path then fails on this stub target, and rolls back)
+$ ls state/.afk-daemon-terminal state/.afk   # no in-pane 'none' record, no away mode left armed
+ls: cannot access '<sandbox>/state/.afk-daemon-terminal': No such file or directory
+ls: cannot access '<sandbox>/state/.afk': No such file or directory

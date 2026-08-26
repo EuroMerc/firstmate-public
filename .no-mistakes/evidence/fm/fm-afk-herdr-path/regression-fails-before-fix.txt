@@ -1,0 +1,29 @@
+=== tests/fm-daemon.test.sh run with bin/fm-afk-start.sh reverted to the pre-fix version (ed3c55c) ===
+FM_TEST_BEGIN 2026-08-26T16:24:43Z tests/fm-daemon.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - fm-afk-start.sh fails before daemon startup when the afk flag cannot be written
+ok - fm-afk-start.sh ignores stale pidfile-only live pids
+ok - fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches
+ok - fm-afk-start.sh clears pre-existing away mode when refusing self-supervision, and refuses only then
+ok - fm-afk-start.sh reports an already-running daemon idempotently instead of refusing the pane it runs in
+ok - fm-afk-start.sh revalidates daemon liveness before reporting refresh success
+not ok - a prepared refresh whose daemon exited before success must fail: afk: daemon already running pid=4073721
+FM_TEST_END 2026-08-26T16:24:44Z tests/fm-daemon.test.sh exit=1 duration_ms=1582 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=1625
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=1582 failed=1
+FM_TEST_SLOWEST rank=1 script=tests/fm-daemon.test.sh duration_ms=1582
+
+=== same suite on the fixed tree (f5982f8) ===
+FM_TEST_BEGIN 2026-08-26T16:23:10Z tests/fm-daemon.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - fm-afk-start.sh fails before daemon startup when the afk flag cannot be written
+ok - fm-afk-start.sh ignores stale pidfile-only live pids
+ok - fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches
+ok - fm-afk-start.sh clears pre-existing away mode when refusing self-supervision, and refuses only then
+ok - fm-afk-start.sh reports an already-running daemon idempotently instead of refusing the pane it runs in
+ok - fm-afk-start.sh revalidates daemon liveness before reporting refresh success
+ok - fm-afk-start.sh revalidates daemon liveness on the launcher-prepared entry too
+ok - fm-afk-start.sh --help documents the in-pane refusal, its exit, and the flag removal
+ok - supervise daemon state root is scoped by FM_HOME
+ok - routine signal self-handles
+ok - captain-relevant status verbs escalate
+...
+113:FM_TEST_END 2026-08-26T16:23:34Z tests/fm-daemon.test.sh exit=0 duration_ms=23491 gate_skip=false

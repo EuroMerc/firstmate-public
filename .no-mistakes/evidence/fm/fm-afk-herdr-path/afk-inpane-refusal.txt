@@ -1,0 +1,12 @@
+=== Scenario A: captain re-enters away mode IN-PANE under herdr, with away mode already armed ===
+$ ls state/.afk   # away mode armed by an earlier launch whose daemon died
+<sandbox>/state/.afk
+
+$ bin/fm-afk-start.sh          # run inside the captain's own herdr pane
+afk: refusing to start the daemon here: this pane is supervisor target 'default:w1:p1' and backend 
+'herdr' reports native agent state, so the daemon would read its own presence as a busy supervisor 
+and never deliver an escalation. Away mode is NOT active; run 'bin/fm-afk-launch.sh start' instead, 
+which hosts the daemon in a separate non-visible terminal
+[exit status] 1
+$ ls state/.afk                # the refused entry cleared the stale flag: no away mode without supervision
+ls: cannot access '<sandbox>/state/.afk': No such file or directory
