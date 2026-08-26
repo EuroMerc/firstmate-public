@@ -89,6 +89,7 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
   dir=$(make_supercase afk-start-self-supervision)
   state="$dir/state"
   out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
     HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE= \
     "$AFK_START" 2>&1)
   status=$?
@@ -162,7 +163,8 @@ test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$state/.supervise-daemon.lock/pid-identity" )
 
   out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_SUPERVISOR_BACKEND=herdr HERDR_ENV=1 HERDR_PANE_ID=w1:p1 \
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 \
     HERDR_SESSION=default TMUX_PANE= "$AFK_START" 2>&1)
   status=$?
 
@@ -1941,6 +1943,7 @@ test_daemon_refuses_to_supervise_its_own_pane_on_native_busy_backend() {
   # Own pane IS the supervisor target on a backend with native agent state.
   daemon_startup_attempt "$state" "$fakebin" \
     FM_TEST_HERDR_CALLS="$calls" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
     HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE=
   err=$(cat "$DAEMON_STARTUP_ERR")
   [ "$DAEMON_STARTUP_STATUS" != timeout ] \
