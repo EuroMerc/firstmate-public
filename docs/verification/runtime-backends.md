@@ -644,7 +644,7 @@ tests/fm-daemon.test.sh
 ```
 
 They pin the native-agent-state capability list against every known backend, the redirect of an in-pane launch request on a capable backend, and both startup boundaries that refuse self-supervision there, each with the opposite-backend case asserted so a blanket pass cannot satisfy them.
-The entry-point regressions also prove that refusal clears a pre-existing away-mode flag, a live daemon refresh remains idempotent, and the lock is revalidated before that refresh reports success.
+The entry-point regressions also prove that refusal clears a pre-existing away-mode flag, a live daemon refresh remains idempotent, that the lock is revalidated before that refresh reports success on both the direct and the launcher-prepared entry, and that the entry's own `--help` output states the refusal, the flag removal, and the non-zero exit.
 
 ## Zellij
 

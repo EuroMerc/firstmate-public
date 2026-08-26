@@ -300,7 +300,7 @@ Recovery reconciles only the recorded exact id.
 That choice is enforced rather than remembered: a `start-native` request redirects to this terminal path on a backend with native agent state, and the daemon separately refuses at startup to supervise the pane it is running in there, so no launch path can arrange the silent self-blocking daemon.
 A direct in-pane `bin/fm-afk-start.sh` refuses the same arrangement before writing a new away-mode flag and clears any pre-existing flag, so a refusal never leaves `state/.afk` set with nothing supervising - which would also stop the ordinary stop-hook watcher from arming.
 An entry whose daemon lock remains live through the refresh is a working session rather than a launch, so it reports the running daemon idempotently instead of judging an arrangement it did not create.
-If that daemon exits before the success report, the entry follows the ordinary no-live refusal or recovery path instead of leaving a freshly written flag backed only by a stale liveness sample.
+If that daemon exits before the success report, the lock is revalidated there and both entry forms follow the ordinary no-live path instead of reporting supervision from a stale liveness sample: a direct in-pane entry refuses and clears the flag as above, while a launcher-prepared entry reaches the daemon's own startup backstop, which refuses audibly.
 
 One window stays open here, as a deliberately accepted residual risk rather than an oversight.
 A `FM_AFK_STATE_PREPARED=1` entry trusts the launcher's already-written `state/.afk` and performs no launch-arrangement check of its own.
