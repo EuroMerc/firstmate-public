@@ -27,9 +27,10 @@
 # an in-pane start refuses when that arrangement is the self-blocking one
 # (supervisor_self_supervision_refused) and clears any pre-existing away-mode
 # flag, so a refusal never leaves state/.afk set with nothing supervising. An
-# entry that finds a live daemon is a refresh of a working session rather than a
-# launch, so it reports
-# that idempotently instead of judging the arrangement it did not create.
+# entry whose daemon lock remains live through the refresh belongs to a working
+# session rather than a launch, so it reports that idempotently instead of
+# judging the arrangement it did not create. If the lock holder disappears
+# before that report, the entry follows the ordinary no-live path instead.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.

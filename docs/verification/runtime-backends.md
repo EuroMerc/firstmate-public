@@ -643,7 +643,8 @@ tests/fm-afk-launch.test.sh
 tests/fm-daemon.test.sh
 ```
 
-They pin the native-agent-state capability list against every known backend, the redirect of an in-pane launch request on a capable backend, and the daemon's refusal to supervise the pane it runs in there, each with the opposite-backend case asserted so a blanket pass cannot satisfy them.
+They pin the native-agent-state capability list against every known backend, the redirect of an in-pane launch request on a capable backend, and both startup boundaries that refuse self-supervision there, each with the opposite-backend case asserted so a blanket pass cannot satisfy them.
+The entry-point regressions also prove that refusal clears a pre-existing away-mode flag, a live daemon refresh remains idempotent, and the lock is revalidated before that refresh reports success.
 
 ## Zellij
 

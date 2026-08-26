@@ -298,8 +298,9 @@ The launch path is therefore a supervisor-backend decision rather than a harness
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 That choice is enforced rather than remembered: a `start-native` request redirects to this terminal path on a backend with native agent state, and the daemon separately refuses at startup to supervise the pane it is running in there, so no launch path can arrange the silent self-blocking daemon.
-A direct in-pane `bin/fm-afk-start.sh` refuses the same arrangement before it arms away mode, so a refusal never leaves `state/.afk` set with nothing supervising - which would also stop the ordinary stop-hook watcher from arming.
-An entry that finds a live daemon is a refresh of a working session rather than a launch, so it reports the running daemon idempotently instead of judging an arrangement it did not create.
+A direct in-pane `bin/fm-afk-start.sh` refuses the same arrangement before writing a new away-mode flag and clears any pre-existing flag, so a refusal never leaves `state/.afk` set with nothing supervising - which would also stop the ordinary stop-hook watcher from arming.
+An entry whose daemon lock remains live through the refresh is a working session rather than a launch, so it reports the running daemon idempotently instead of judging an arrangement it did not create.
+If that daemon exits before the success report, the entry follows the ordinary no-live refusal or recovery path instead of leaving a freshly written flag backed only by a stale liveness sample.
 
 One window stays open here, as a deliberately accepted residual risk rather than an oversight.
 A `FM_AFK_STATE_PREPARED=1` entry trusts the launcher's already-written `state/.afk` and performs no launch-arrangement check of its own.

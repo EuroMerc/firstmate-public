@@ -38,7 +38,7 @@ batched digest rather than per-wake injections.
    A wrong pick is corrected rather than delivered: `start-native` redirects to the terminal path on such a backend, and an in-pane daemon entry refuses there instead of arming away mode.
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
-   It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
+   It reports an already-running daemon only after revalidating the identity-backed lock; if that holder disappears during the refresh, it follows the ordinary no-live refusal or recovery path instead.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
