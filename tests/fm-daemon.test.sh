@@ -91,7 +91,7 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
   date '+%s' > "$state/.afk"
   out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
     FM_SUPERVISOR_TARGET=default:w1:p1 \
-    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE= \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE='' \
     "$AFK_START" 2>&1)
   status=$?
   [ "$status" -ne 0 ] \
@@ -132,7 +132,7 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
   out=$(PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$dir/herdr-calls" \
     FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
     FM_SUPERVISOR_TARGET=default:w1:p1 \
-    HERDR_ENV=1 HERDR_PANE_ID=w7:p1 HERDR_SESSION=default TMUX_PANE= \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p1 HERDR_SESSION=default TMUX_PANE='' \
     "$AFK_START" 2>&1)
   status=$?
   assert_not_contains "$out" "refusing to start the daemon here" \
@@ -153,20 +153,20 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
 # state, so this pins the ordering against the exact constellation that produced
 # it - own pane, native-busy backend, live lock holder.
 test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
-  local dir state sleeper_pid out status
+  local case_dir case_state sleeper_pid out status
 
-  dir=$(make_supercase afk-start-refresh-live-daemon)
-  state="$dir/state"
-  date '+%s' > "$state/.afk"
+  case_dir=$(make_supercase afk-start-refresh-live-daemon)
+  case_state="$case_dir/state"
+  date '+%s' > "$case_state/.afk"
   sleep 30 & sleeper_pid=$!
-  mkdir -p "$state/.supervise-daemon.lock"
-  printf '%s' "$sleeper_pid" > "$state/.supervise-daemon.lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$state/.supervise-daemon.lock/pid-identity" )
+  mkdir -p "$case_state/.supervise-daemon.lock"
+  printf '%s' "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity" )
 
-  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+  out=$(PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
     HERDR_ENV=1 HERDR_PANE_ID=w1:p1 \
-    HERDR_SESSION=default TMUX_PANE= "$AFK_START" 2>&1)
+    HERDR_SESSION=default TMUX_PANE='' "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -eq 0 ] \
@@ -175,7 +175,7 @@ test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
     "the refresh must report the live daemon it found"
   assert_not_contains "$out" "refusing to start the daemon here" \
     "the refresh must not claim away mode was not entered while a daemon supervises"
-  assert_present "$state/.afk" \
+  assert_present "$case_state/.afk" \
     "the refresh must leave away mode armed"
 
   kill "$sleeper_pid" 2>/dev/null || true
@@ -184,26 +184,26 @@ test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
 }
 
 test_afk_start_revalidates_live_daemon_before_refresh_success() {
-  local dir state sleeper_pid start_pid out status pending waited=0
+  local case_dir case_state sleeper_pid start_pid out status pending waited=0
 
-  dir=$(make_supercase afk-start-refresh-daemon-exits)
-  state="$dir/state"
-  date '+%s' > "$state/.afk"
+  case_dir=$(make_supercase afk-start-refresh-daemon-exits)
+  case_state="$case_dir/state"
+  date '+%s' > "$case_state/.afk"
   sleep 30 & sleeper_pid=$!
-  mkdir -p "$state/.supervise-daemon.lock" "$state/.cursor-park-owner.lock"
-  printf '%s' "$sleeper_pid" > "$state/.supervise-daemon.lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$state/.supervise-daemon.lock/pid-identity" )
-  printf '%s' "$$" > "$state/.cursor-park-owner.lock/pid"
+  mkdir -p "$case_state/.supervise-daemon.lock" "$case_state/.cursor-park-owner.lock"
+  printf '%s' "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity" )
+  printf '%s' "$$" > "$case_state/.cursor-park-owner.lock/pid"
 
-  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+  PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
-    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE= \
-    "$AFK_START" > "$dir/start.out" 2>&1 &
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE='' \
+    "$AFK_START" > "$case_dir/start.out" 2>&1 &
   start_pid=$!
 
   pending=
   while [ "$waited" -lt 50 ]; do
-    for pending in "$state"/.afk.pending.*; do
+    for pending in "$case_state"/.afk.pending.*; do
       [ -e "$pending" ] && break 2
       pending=
     done
@@ -219,10 +219,10 @@ test_afk_start_revalidates_live_daemon_before_refresh_success() {
 
   kill "$sleeper_pid" 2>/dev/null || true
   wait "$sleeper_pid" 2>/dev/null || true
-  rm -rf "$state/.cursor-park-owner.lock"
+  rm -rf "$case_state/.cursor-park-owner.lock"
   wait "$start_pid"
   status=$?
-  out=$(cat "$dir/start.out")
+  out=$(cat "$case_dir/start.out")
 
   [ "$status" -ne 0 ] \
     || fail "a refresh whose daemon exited before success must fail: $out"
@@ -230,7 +230,7 @@ test_afk_start_revalidates_live_daemon_before_refresh_success() {
     "the vanished daemon must route through the ordinary no-live refusal"
   assert_not_contains "$out" "daemon already running" \
     "the refresh reported success from a stale daemon-liveness snapshot"
-  assert_absent "$state/.afk" \
+  assert_absent "$case_state/.afk" \
     "the stale refresh left away mode armed without a live daemon"
 
   pass "fm-afk-start.sh revalidates daemon liveness before reporting refresh success"
