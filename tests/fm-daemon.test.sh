@@ -236,6 +236,100 @@ test_afk_start_revalidates_live_daemon_before_refresh_success() {
   pass "fm-afk-start.sh revalidates daemon liveness before reporting refresh success"
 }
 
+# The same revalidation must protect the LAUNCHER-PREPARED entry, which skips
+# the flag write and so has no natural blocking point of its own. Here the
+# holder disappears after the liveness snapshot and before the success report;
+# the entry must not report the daemon it no longer has. The prepared path does
+# not clear the launcher-written flag (that is the launcher's), so the honest
+# outcome is falling through to the daemon, whose startup backstop refuses
+# audibly. The lock's pid-identity is a FIFO so the test, not a sleep, decides
+# when each liveness read completes: the writer is unblocked only once the real
+# entry opens it, and the holder is killed while the second read is still open.
+test_afk_start_prepared_entry_revalidates_live_daemon_before_refresh_success() {
+  local case_dir case_state fakebin case_lock identity sleeper_pid start_pid watchdog_pid out status
+
+  case_dir=$(make_supercase afk-start-prepared-daemon-exits)
+  case_state="$case_dir/state"
+  fakebin=$(daemon_startup_fakebin "$case_dir")
+  case_lock="$case_state/.supervise-daemon.lock"
+  date '+%s' > "$case_state/.afk"
+  sleep 30 & sleeper_pid=$!
+  identity=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" )
+  mkdir -p "$case_lock"
+  printf '%s' "$sleeper_pid" > "$case_lock/pid"
+  mkfifo "$case_lock/pid-identity"
+
+  PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$case_dir/herdr-calls" \
+    FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
+    FM_AFK_STATE_PREPARED=1 \
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE='' \
+    "$AFK_START" > "$case_dir/start.out" 2>&1 &
+  start_pid=$!
+
+  # Read 1 - the pre-write snapshot. Opening for write blocks until the entry
+  # opens the FIFO for reading, so this returns only once it is at that check.
+  exec 9>"$case_lock/pid-identity"
+  printf '%s\n' "$identity" >&9
+  exec 9>&-
+
+  # An entry that never revalidates exits without a second read, so nothing
+  # would ever open the FIFO and the blocking write below would hang instead of
+  # failing. This watchdog drains it once the entry is gone, turning that into
+  # the ordinary assertion failure on the exit status and output.
+  ( while kill -0 "$start_pid" 2>/dev/null; do sleep 0.1; done
+    [ -p "$case_lock/pid-identity" ] && cat "$case_lock/pid-identity" >/dev/null 2>&1
+    exit 0 ) &
+  watchdog_pid=$!
+
+  # Read 2 - the revalidation before the success report. Open first, then kill
+  # the holder while the entry is still blocked on the read, then close so the
+  # read completes: the identity comparison cannot run before the daemon died.
+  exec 9>"$case_lock/pid-identity"
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  rm -f "$case_lock/pid-identity"
+  printf '%s\n' "$identity" > "$case_lock/pid-identity"
+  exec 9>&-
+
+  wait "$start_pid"
+  status=$?
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  out=$(cat "$case_dir/start.out")
+
+  [ "$status" -ne 0 ] \
+    || fail "a prepared refresh whose daemon exited before success must fail: $out"
+  assert_not_contains "$out" "daemon already running" \
+    "the prepared entry reported success from a stale daemon-liveness snapshot"
+  assert_contains "$out" "is this daemon's own pane" \
+    "the vanished holder must fall through to the daemon's own startup refusal"
+
+  pass "fm-afk-start.sh revalidates daemon liveness on the launcher-prepared entry too"
+}
+
+# --help is the operator-facing contract for this entry: it must name the
+# in-pane refusal, its exit, and that a pre-existing away-mode flag is removed,
+# because that outcome is destructive on the documented recovery re-entry.
+test_afk_start_help_documents_the_in_pane_refusal() {
+  local out status
+
+  out=$("$AFK_START" --help 2>&1)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "fm-afk-start.sh --help must exit 0, got $status: $out"
+  assert_contains "$out" "REFUSES" \
+    "--help must tell the operator that an in-pane start on such a backend refuses"
+  assert_contains "$out" "REMOVES any pre-existing" \
+    "--help must name the removal of an existing away-mode flag"
+  assert_contains "$out" "exits 1" \
+    "--help must name the refusal's exit status"
+  assert_contains "$out" "fm-afk-launch.sh start" \
+    "--help must point at the launch that works instead"
+
+  pass "fm-afk-start.sh --help documents the in-pane refusal, its exit, and the flag removal"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -2224,6 +2318,8 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_afk_start_refusal_never_leaves_away_mode_armed
 test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch
 test_afk_start_revalidates_live_daemon_before_refresh_success
+test_afk_start_prepared_entry_revalidates_live_daemon_before_refresh_success
+test_afk_start_help_documents_the_in_pane_refusal
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

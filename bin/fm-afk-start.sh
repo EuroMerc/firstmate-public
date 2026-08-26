@@ -11,6 +11,12 @@
 #       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
+#   A direct, non-prepared in-pane start on a supervisor backend that reports
+#   native agent state REFUSES instead: it says why, REMOVES any pre-existing
+#   state/.afk so away mode is never left armed with nothing supervising, and
+#   exits 1. Use 'bin/fm-afk-launch.sh start' there; its header owns that rule.
+#   The daemon lock is revalidated immediately before the "already running"
+#   report, so a lock holder that disappeared takes that same path.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
@@ -30,7 +36,9 @@
 # entry whose daemon lock remains live through the refresh belongs to a working
 # session rather than a launch, so it reports that idempotently instead of
 # judging the arrangement it did not create. If the lock holder disappears
-# before that report, the entry follows the ordinary no-live path instead.
+# before that report, either entry follows the ordinary no-live path instead -
+# for a prepared entry that is the daemon's own startup backstop, which refuses
+# audibly rather than letting a stale snapshot report supervision that ended.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
@@ -184,11 +192,17 @@ fm_afk_start_main() {
       return 1
     fi
     fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
-    if [ "$daemon_live" -eq 1 ] && ! daemon_lock_held_by_live_daemon; then
-      daemon_live=0
-      if fm_afk_refuse_self_supervision; then
-        return 1
-      fi
+  fi
+
+  # Revalidate immediately before the shared success report: the snapshot above
+  # can go stale while the branch runs, and reporting a refresh from it would
+  # claim active away mode with nothing supervising. Both entries are protected
+  # the same way; a vanished lock holder falls through to the ordinary no-live
+  # path, which for a prepared entry means the daemon's own startup backstop.
+  if [ "$daemon_live" -eq 1 ] && ! daemon_lock_held_by_live_daemon; then
+    daemon_live=0
+    if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ] && fm_afk_refuse_self_supervision; then
+      return 1
     fi
   fi
 
