@@ -26,7 +26,9 @@
 # in-pane start lets the daemon auto-discover the captain pane it inherits. Such
 # an in-pane start refuses BEFORE arming away mode when that arrangement is the
 # self-blocking one (supervisor_self_supervision_refused), so a refusal never
-# leaves state/.afk set with nothing supervising.
+# leaves state/.afk set with nothing supervising. An entry that finds a live
+# daemon is a refresh of a working session rather than a launch, so it reports
+# that idempotently instead of judging the arrangement it did not create.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
@@ -147,6 +149,14 @@ fm_afk_start_main() {
   esac
 
   mkdir -p "$FM_AFK_STATE"
+
+  # Sampled before any state write: an entry that finds a live daemon is a
+  # REFRESH of a working away session, not a launch, so it must not be judged by
+  # the launch-arrangement rules below.
+  local pid daemon_live=0
+  pid=$(daemon_lock_pid 2>/dev/null || true)
+  daemon_lock_held_by_live_daemon && daemon_live=1
+
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
@@ -157,18 +167,18 @@ fm_afk_start_main() {
     # watches and nothing says so. Rule and rationale: the header of
     # bin/fm-afk-launch.sh.
     local start_backend start_target
-    start_backend=$(discover_supervisor_backend) || true
-    start_target=$(discover_supervisor_target) || true
-    if supervisor_self_supervision_refused "$start_backend" "$start_target"; then
-      echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode was NOT entered; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
-      return 1
+    if [ "$daemon_live" -eq 0 ]; then
+      start_backend=$(discover_supervisor_backend) || true
+      start_target=$(discover_supervisor_target) || true
+      if supervisor_self_supervision_refused "$start_backend" "$start_target"; then
+        echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode was NOT entered; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
+        return 1
+      fi
     fi
     fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
   fi
 
-  local pid
-  pid=$(daemon_lock_pid 2>/dev/null || true)
-  if daemon_lock_held_by_live_daemon; then
+  if [ "$daemon_live" -eq 1 ]; then
     echo "afk: daemon already running pid=$pid"
     return 0
   fi

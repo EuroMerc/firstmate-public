@@ -109,13 +109,16 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
   # must be entered and the daemon attempted as before.
   dir=$(make_supercase afk-start-own-pane-tmux)
   state="$dir/state"
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux TMUX_PANE='%9' \
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux TMUX_PANE='%9' \
     FM_FAKE_TMUX_PANE_ALIVE=0 "$AFK_START" 2>&1)
   status=$?
   assert_not_contains "$out" "refusing to start the daemon here" \
     "a backend with no native agent state must not refuse an in-pane start"
   assert_contains "$out" "starting supervise daemon" \
     "the tmux in-pane start must still reach daemon startup"
+  assert_contains "$out" "does not resolve to a tmux pane" \
+    "the daemon must have probed make_supercase's fake tmux, not whatever tmux the machine happens to run"
   assert_present "$state/.afk" \
     "the tmux in-pane start must still arm away mode"
 
@@ -138,6 +141,43 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
     "the foreign-target start must arm away mode"
 
   pass "fm-afk-start.sh refuses self-supervision before arming away mode, and only then"
+}
+
+# The self-supervision refusal judges a LAUNCH arrangement, so it must not fire
+# on a refresh of an away session that is already supervised correctly: the
+# launcher hosts the daemon in its own terminal, and an in-pane
+# bin/fm-afk-start.sh is then the idempotent "already running" no-op. Reporting a
+# refusal there would tell the captain the opposite of the actual supervision
+# state, so this pins the ordering against the exact constellation that produced
+# it - own pane, native-busy backend, live lock holder.
+test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
+  local dir state sleeper_pid out status
+
+  dir=$(make_supercase afk-start-refresh-live-daemon)
+  state="$dir/state"
+  date '+%s' > "$state/.afk"
+  sleep 30 & sleeper_pid=$!
+  mkdir -p "$state/.supervise-daemon.lock"
+  printf '%s' "$sleeper_pid" > "$state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$state/.supervise-daemon.lock/pid-identity" )
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=herdr HERDR_ENV=1 HERDR_PANE_ID=w1:p1 \
+    HERDR_SESSION=default TMUX_PANE= "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -eq 0 ] \
+    || fail "an in-pane refresh of a correctly supervised away session must exit 0, got $status: $out"
+  assert_contains "$out" "daemon already running pid=$sleeper_pid" \
+    "the refresh must report the live daemon it found"
+  assert_not_contains "$out" "refusing to start the daemon here" \
+    "the refresh must not claim away mode was not entered while a daemon supervises"
+  assert_present "$state/.afk" \
+    "the refresh must leave away mode armed"
+
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  pass "fm-afk-start.sh reports an already-running daemon idempotently instead of refusing the pane it runs in"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -2125,6 +2165,7 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_afk_start_refusal_never_leaves_away_mode_armed
+test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
