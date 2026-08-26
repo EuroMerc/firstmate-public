@@ -80,14 +80,15 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
 # A refusal must never leave away mode armed with nothing supervising: with
 # state/.afk present, bin/fm-claude-stop-autoarm.sh hands the watcher to away
 # supervision, so an armed flag plus a daemon that refused to run means nobody
-# watches at all and nothing reports it. The in-pane entry therefore refuses
-# BEFORE it arms away mode. Both divergence cases run the same real entry with
-# only one signal changed, so a pass cannot come from a blanket refusal.
+# watches at all and nothing reports it. The in-pane entry therefore clears an
+# existing flag when it refuses. Both divergence cases run the same real entry
+# with only one signal changed, so a pass cannot come from a blanket refusal.
 test_afk_start_refusal_never_leaves_away_mode_armed() {
   local dir state fakebin out status
 
-  dir=$(make_supercase afk-start-self-supervision)
+  dir=$(make_supercase afk-start-self-supervision-recovery)
   state="$dir/state"
+  date '+%s' > "$state/.afk"
   out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
     FM_SUPERVISOR_TARGET=default:w1:p1 \
     HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE= \
@@ -141,7 +142,7 @@ test_afk_start_refusal_never_leaves_away_mode_armed() {
   assert_present "$state/.afk" \
     "the foreign-target start must arm away mode"
 
-  pass "fm-afk-start.sh refuses self-supervision before arming away mode, and only then"
+  pass "fm-afk-start.sh clears pre-existing away mode when refusing self-supervision, and refuses only then"
 }
 
 # The self-supervision refusal judges a LAUNCH arrangement, so it must not fire

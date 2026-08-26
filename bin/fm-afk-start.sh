@@ -24,10 +24,11 @@
 # re-derive it here. A launcher-prepared start reaches this file with
 # FM_AFK_STATE_PREPARED=1 and an already-resolved FM_SUPERVISOR_TARGET, while an
 # in-pane start lets the daemon auto-discover the captain pane it inherits. Such
-# an in-pane start refuses BEFORE arming away mode when that arrangement is the
-# self-blocking one (supervisor_self_supervision_refused), so a refusal never
-# leaves state/.afk set with nothing supervising. An entry that finds a live
-# daemon is a refresh of a working session rather than a launch, so it reports
+# an in-pane start refuses when that arrangement is the self-blocking one
+# (supervisor_self_supervision_refused) and clears any pre-existing away-mode
+# flag, so a refusal never leaves state/.afk set with nothing supervising. An
+# entry that finds a live daemon is a refresh of a working session rather than a
+# launch, so it reports
 # that idempotently instead of judging the arrangement it did not create.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
@@ -160,18 +161,21 @@ fm_afk_start_main() {
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
-    # Refuse BEFORE the flag write, never after: the daemon rejects this same
-    # arrangement at startup, and a refusal that has already armed away mode
-    # leaves state/.afk set with nothing supervising - bin/fm-claude-stop-autoarm.sh
-    # then hands the watcher to away supervision that is not running, so nobody
-    # watches and nothing says so. Rule and rationale: the header of
-    # bin/fm-afk-launch.sh.
+    # Refuse before attempting a new flag write and clear any flag retained from
+    # an earlier session: the daemon rejects this same arrangement at startup,
+    # and state/.afk with nothing supervising makes bin/fm-claude-stop-autoarm.sh
+    # hand the watcher to away supervision that is not running, so nobody watches
+    # and nothing says so. Rule and rationale: the header of bin/fm-afk-launch.sh.
     local start_backend start_target
     if [ "$daemon_live" -eq 0 ]; then
       start_backend=$(discover_supervisor_backend) || true
       start_target=$(discover_supervisor_target) || true
       if supervisor_self_supervision_refused "$start_backend" "$start_target"; then
-        echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode was NOT entered; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
+        if ! rm -f "$FM_AFK_STATE/.afk"; then
+          echo "afk: refusing to start the daemon here and failed to clear the away-mode flag" >&2
+          return 1
+        fi
+        echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode is NOT active; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
         return 1
       fi
     fi
