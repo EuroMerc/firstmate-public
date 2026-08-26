@@ -152,6 +152,7 @@ Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1`
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+On a backend that reports native agent state, a target naming the daemon's own pane also refuses at daemon startup, because such a daemon reads its own presence as a busy supervisor; [Away-mode supervisor support](herdr-backend.md#away-mode-supervisor-support) owns that rule and the launch path it implies.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
