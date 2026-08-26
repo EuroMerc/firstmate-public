@@ -183,6 +183,59 @@ test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
   pass "fm-afk-start.sh reports an already-running daemon idempotently instead of refusing the pane it runs in"
 }
 
+test_afk_start_revalidates_live_daemon_before_refresh_success() {
+  local dir state sleeper_pid start_pid out status pending waited=0
+
+  dir=$(make_supercase afk-start-refresh-daemon-exits)
+  state="$dir/state"
+  date '+%s' > "$state/.afk"
+  sleep 30 & sleeper_pid=$!
+  mkdir -p "$state/.supervise-daemon.lock" "$state/.cursor-park-owner.lock"
+  printf '%s' "$sleeper_pid" > "$state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$state/.supervise-daemon.lock/pid-identity" )
+  printf '%s' "$$" > "$state/.cursor-park-owner.lock/pid"
+
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE= \
+    "$AFK_START" > "$dir/start.out" 2>&1 &
+  start_pid=$!
+
+  pending=
+  while [ "$waited" -lt 50 ]; do
+    for pending in "$state"/.afk.pending.*; do
+      [ -e "$pending" ] && break 2
+      pending=
+    done
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ -z "$pending" ]; then
+    kill "$start_pid" "$sleeper_pid" 2>/dev/null || true
+    wait "$start_pid" 2>/dev/null || true
+    wait "$sleeper_pid" 2>/dev/null || true
+    fail "fm-afk-start.sh did not reach its blocked away-mode refresh"
+  fi
+
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  rm -rf "$state/.cursor-park-owner.lock"
+  wait "$start_pid"
+  status=$?
+  out=$(cat "$dir/start.out")
+
+  [ "$status" -ne 0 ] \
+    || fail "a refresh whose daemon exited before success must fail: $out"
+  assert_contains "$out" "refusing to start the daemon here" \
+    "the vanished daemon must route through the ordinary no-live refusal"
+  assert_not_contains "$out" "daemon already running" \
+    "the refresh reported success from a stale daemon-liveness snapshot"
+  assert_absent "$state/.afk" \
+    "the stale refresh left away mode armed without a live daemon"
+
+  pass "fm-afk-start.sh revalidates daemon liveness before reporting refresh success"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -2170,6 +2223,7 @@ test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_afk_start_refusal_never_leaves_away_mode_armed
 test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch
+test_afk_start_revalidates_live_daemon_before_refresh_success
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

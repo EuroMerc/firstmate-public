@@ -142,6 +142,19 @@ fm_afk_flag_write() {  # <state-dir>
   return 1
 }
 
+fm_afk_refuse_self_supervision() {
+  local start_backend start_target
+  start_backend=$(discover_supervisor_backend) || true
+  start_target=$(discover_supervisor_target) || true
+  supervisor_self_supervision_refused "$start_backend" "$start_target" || return 1
+  if ! rm -f "$FM_AFK_STATE/.afk"; then
+    echo "afk: refusing to start the daemon here and failed to clear the away-mode flag" >&2
+    return 0
+  fi
+  echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode is NOT active; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
+  return 0
+}
+
 fm_afk_start_main() {
   case "${1:-}" in
     '' ) ;;
@@ -166,20 +179,16 @@ fm_afk_start_main() {
     # and state/.afk with nothing supervising makes bin/fm-claude-stop-autoarm.sh
     # hand the watcher to away supervision that is not running, so nobody watches
     # and nothing says so. Rule and rationale: the header of bin/fm-afk-launch.sh.
-    local start_backend start_target
-    if [ "$daemon_live" -eq 0 ]; then
-      start_backend=$(discover_supervisor_backend) || true
-      start_target=$(discover_supervisor_target) || true
-      if supervisor_self_supervision_refused "$start_backend" "$start_target"; then
-        if ! rm -f "$FM_AFK_STATE/.afk"; then
-          echo "afk: refusing to start the daemon here and failed to clear the away-mode flag" >&2
-          return 1
-        fi
-        echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode is NOT active; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
+    if [ "$daemon_live" -eq 0 ] && fm_afk_refuse_self_supervision; then
+      return 1
+    fi
+    fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
+    if [ "$daemon_live" -eq 1 ] && ! daemon_lock_held_by_live_daemon; then
+      daemon_live=0
+      if fm_afk_refuse_self_supervision; then
         return 1
       fi
     fi
-    fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
   fi
 
   if [ "$daemon_live" -eq 1 ]; then
