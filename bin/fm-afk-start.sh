@@ -11,22 +11,34 @@
 #       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
+#   A direct, non-prepared in-pane start on a supervisor backend that reports
+#   native agent state REFUSES instead: it says why, REMOVES any pre-existing
+#   state/.afk so away mode is never left armed with nothing supervising, and
+#   exits 1. Use 'bin/fm-afk-launch.sh start' there; its header owns that rule.
+#   The daemon lock is revalidated immediately before the "already running"
+#   report, so a lock holder that disappeared takes that same path.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
 # enables nounset and errexit; callers that need different shell options must
 # restore them explicitly.
 #
-# This is the COMMON daemon entry for every backend. HOW it becomes a tracked
-# background process differs by harness/backend and is owned elsewhere:
-#   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
-#   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
-#     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
-#     backend (herdr tab/workspace, tmux detached session) and passes the
-#     captain pane in as FM_SUPERVISOR_TARGET so injection targets it, not the
-#     daemon's own new pane.
+# This is the COMMON daemon entry for every backend. WHICH hosting a given
+# harness and supervisor backend may use - a harness-native in-pane background
+# tool, or the launcher's non-visible tracked terminal - is decided and enforced
+# by bin/fm-afk-launch.sh, whose header owns that rule and its rationale; do not
+# re-derive it here. A launcher-prepared start reaches this file with
+# FM_AFK_STATE_PREPARED=1 and an already-resolved FM_SUPERVISOR_TARGET, while an
+# in-pane start lets the daemon auto-discover the captain pane it inherits. Such
+# an in-pane start refuses when that arrangement is the self-blocking one
+# (supervisor_self_supervision_refused) and clears any pre-existing away-mode
+# flag, so a refusal never leaves state/.afk set with nothing supervising. An
+# entry whose daemon lock remains live through the refresh belongs to a working
+# session rather than a launch, so it reports that idempotently instead of
+# judging the arrangement it did not create. If the lock holder disappears
+# before that report, either entry follows the ordinary no-live path instead -
+# for a prepared entry that is the daemon's own startup backstop, which refuses
+# audibly rather than letting a stale snapshot report supervision that ended.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
@@ -41,9 +53,18 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$FM_AFK_START_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_AFK_START_DIR/fm-supervisor-target-lib.sh"
 
+# Print the operator-facing part of the header block, stopping at the
+# "This file is sourceable" paragraph (implementation detail, not usage).
+# Anchored to the block itself rather than a line number, which truncates the
+# text mid-sentence as soon as the header above it grows.
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 { if (!/^#/ || /^# This file is sourceable/) exit; sub(/^# ?/, ""); print }' \
+    "${BASH_SOURCE[0]}"
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
@@ -130,6 +151,19 @@ fm_afk_flag_write() {  # <state-dir>
   return 1
 }
 
+fm_afk_refuse_self_supervision() {
+  local start_backend start_target
+  start_backend=$(discover_supervisor_backend) || true
+  start_target=$(discover_supervisor_target) || true
+  supervisor_self_supervision_refused "$start_backend" "$start_target" || return 1
+  if ! rm -f "$FM_AFK_STATE/.afk"; then
+    echo "afk: refusing to start the daemon here and failed to clear the away-mode flag" >&2
+    return 0
+  fi
+  echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode is NOT active; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
+  return 0
+}
+
 fm_afk_start_main() {
   case "${1:-}" in
     '' ) ;;
@@ -138,15 +172,41 @@ fm_afk_start_main() {
   esac
 
   mkdir -p "$FM_AFK_STATE"
+
+  # Sampled before any state write: an entry that finds a live daemon is a
+  # REFRESH of a working away session, not a launch, so it must not be judged by
+  # the launch-arrangement rules below.
+  local pid daemon_live=0
+  pid=$(daemon_lock_pid 2>/dev/null || true)
+  daemon_lock_held_by_live_daemon && daemon_live=1
+
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
+    # Refuse before attempting a new flag write and clear any flag retained from
+    # an earlier session: the daemon rejects this same arrangement at startup,
+    # and state/.afk with nothing supervising makes bin/fm-claude-stop-autoarm.sh
+    # hand the watcher to away supervision that is not running, so nobody watches
+    # and nothing says so. Rule and rationale: the header of bin/fm-afk-launch.sh.
+    if [ "$daemon_live" -eq 0 ] && fm_afk_refuse_self_supervision; then
+      return 1
+    fi
     fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
   fi
 
-  local pid
-  pid=$(daemon_lock_pid 2>/dev/null || true)
-  if daemon_lock_held_by_live_daemon; then
+  # Revalidate immediately before the shared success report: the snapshot above
+  # can go stale while the branch runs, and reporting a refresh from it would
+  # claim active away mode with nothing supervising. Both entries are protected
+  # the same way; a vanished lock holder falls through to the ordinary no-live
+  # path, which for a prepared entry means the daemon's own startup backstop.
+  if [ "$daemon_live" -eq 1 ] && ! daemon_lock_held_by_live_daemon; then
+    daemon_live=0
+    if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ] && fm_afk_refuse_self_supervision; then
+      return 1
+    fi
+  fi
+
+  if [ "$daemon_live" -eq 1 ]; then
     echo "afk: daemon already running pid=$pid"
     return 0
   fi

@@ -1113,6 +1113,50 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+# --- native busy-state capability -------------------------------------------
+# fm_backend_has_native_busy_state is the single owner of which backends answer
+# busy/idle from the provider's own agent-state registry, and the away-mode
+# launch path chooses between an in-pane daemon and a separate terminal from it.
+# Iterating FM_BACKEND_KNOWN keeps a newly added backend from silently defaulting
+# into the capable set, and the negative dispatch case pins the predicate as a
+# NECESSARY condition: an adapter function alone cannot produce a native verdict.
+test_native_busy_state_capability_is_owned_and_gating() {
+  local backend native
+
+  fm_backend_has_native_busy_state herdr \
+    || fail "herdr answers busy/idle from its own agent-state registry and must be reported as capable"
+
+  for backend in $FM_BACKEND_KNOWN; do
+    [ "$backend" = herdr ] && continue
+    if fm_backend_has_native_busy_state "$backend"; then
+      fail "backend '$backend' has no verified native agent-state primitive but was reported as capable"
+    fi
+    native=$(fm_backend_busy_state "$backend" "some-target" 2>/dev/null)
+    [ "$native" = unknown ] \
+      || fail "fm_backend_busy_state must report unknown for non-native backend '$backend': $native"
+  done
+
+  # The predicate is a NECESSARY condition for the dispatch, not just a label on
+  # it: withdraw it for the one backend that HAS an adapter busy-state function
+  # and that adapter must no longer be reached, so a native verdict cannot come
+  # from anywhere but the owned capability list. Driving this through herdr is
+  # what makes the case non-vacuous - a backend the dispatch has no branch for
+  # would report unknown with or without the gate.
+  native=$(
+    # shellcheck disable=SC2329 # Both overrides are reached only through the dispatch under test.
+    fm_backend_source() { return 0; }
+    # shellcheck disable=SC2329
+    fm_backend_has_native_busy_state() { return 1; }
+    # shellcheck disable=SC2329 # Must NOT be reached once the predicate rejects herdr.
+    fm_backend_herdr_busy_state() { printf 'busy'; }
+    fm_backend_busy_state herdr "some-target" 2>/dev/null
+  )
+  [ "$native" = unknown ] \
+    || fail "an adapter busy-state function must not bypass fm_backend_has_native_busy_state: $native"
+
+  pass "fm_backend_has_native_busy_state owns the capability list and gates every native busy verdict"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1140,3 +1184,4 @@ test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently
+test_native_busy_state_capability_is_owned_and_gating

@@ -3,15 +3,22 @@
 # launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
 # tear it down by that exact id, and reconcile a leaked one after a crash.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
+# Why this exists (docs/herdr-backend.md "Away-mode supervisor support"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
-# terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
-# script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
-# workspace with --no-focus, or a detached tmux session) that never touches the
-# captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
+# terminal it is already in. A harness with NO native background mechanism (pi)
+# has to manufacture a terminal, and doing that by SPLITTING the captain's active
+# pane visibly shrinks it - the regression this script fixes. Instead this creates
+# a non-visible tracked terminal (a herdr tab/workspace with --no-focus, or a
+# detached tmux session) that never touches the captain's active tab, and NEVER
+# uses shell `&` (which herdr/codex can reap).
+#
+# A harness-native in-pane background tool (claude, grok) is usable ONLY when the
+# SUPERVISOR BACKEND reports no native busy state. Where it reports one
+# (fm_backend_has_native_busy_state), a daemon hosted in the captain's pane is
+# part of that pane's own agent state, so the daemon reads itself as "supervisor
+# busy" and defers every escalation for as long as it runs. `start-native`
+# therefore resolves the supervisor backend and redirects to the terminal path
+# above on such a backend: the backend decides this, never the harness.
 #
 # Correct supervisor targeting: the daemon finds the captain pane to inject into
 # from its OWN inherited env (discover_supervisor_target). Running it in a
@@ -29,6 +36,9 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#                              Redirects to `start` when the supervisor backend
+#                              reports native busy state (see above), because an
+#                              in-pane daemon would defer every escalation there.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -145,8 +155,13 @@ fm_afk_launch_lock_release() {
   rm -rf "$FM_AFK_LAUNCH_LOCK"
 }
 
+# Print the whole header comment block, stopping at the "Test seam:" paragraph
+# (implementation detail, not usage). Anchored to the block itself rather than a
+# line number, which silently truncated the usage text mid-sentence whenever the
+# header grew.
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 { if (!/^#/ || /^# Test seam:/) exit; sub(/^# ?/, ""); print }' \
+    "${BASH_SOURCE[0]}"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -528,7 +543,17 @@ fm_afk_launch_start() {
 }
 
 fm_afk_launch_start_native() {
-  local backup artifact had_afk=0 result=0
+  local backup artifact had_afk=0 result=0 captain_backend
+  # Redirect instead of refusing, so the unsafe in-pane arrangement cannot be
+  # reached from here even when the caller asks for it (rule and rationale: this
+  # file's header). A capable backend with no terminal primitive still refuses
+  # loudly on that path.
+  captain_backend=$(discover_supervisor_backend) || true
+  if fm_backend_has_native_busy_state "$captain_backend"; then
+    fm_afk_launch_log "backend '$captain_backend' reports native busy state; an in-pane daemon would read itself as busy and defer every escalation, so launching it in a separate non-visible terminal instead"
+    fm_afk_launch_start
+    return $?
+  fi
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"

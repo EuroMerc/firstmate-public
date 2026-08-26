@@ -77,6 +77,259 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+# A refusal must never leave away mode armed with nothing supervising: with
+# state/.afk present, bin/fm-claude-stop-autoarm.sh hands the watcher to away
+# supervision, so an armed flag plus a daemon that refused to run means nobody
+# watches at all and nothing reports it. The in-pane entry therefore clears an
+# existing flag when it refuses. Both divergence cases run the same real entry
+# with only one signal changed, so a pass cannot come from a blanket refusal.
+test_afk_start_refusal_never_leaves_away_mode_armed() {
+  local dir state fakebin out status
+
+  dir=$(make_supercase afk-start-self-supervision-recovery)
+  state="$dir/state"
+  date '+%s' > "$state/.afk"
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE='' \
+    "$AFK_START" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "fm-afk-start.sh entered away mode in the pane the daemon would refuse to supervise: $out"
+  assert_contains "$out" "refusing to start the daemon here" \
+    "the refusal must announce itself instead of failing quietly"
+  assert_contains "$out" "fm-afk-launch.sh start" \
+    "the refusal must name the launch that works instead"
+  assert_absent "$state/.afk" \
+    "the refused entry armed away mode with no daemon supervising - the stop hook would now arm no watcher either"
+  assert_not_contains "$out" "starting supervise daemon" \
+    "the refused entry still execed the daemon"
+  assert_absent "$state/.supervise-daemon.lock" \
+    "the refused entry left a daemon lock behind"
+
+  # DIVERGENCE 1: same own pane, backend WITHOUT native agent state. Away mode
+  # must be entered and the daemon attempted as before.
+  dir=$(make_supercase afk-start-own-pane-tmux)
+  state="$dir/state"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_BACKEND=tmux TMUX_PANE='%9' \
+    FM_FAKE_TMUX_PANE_ALIVE=0 "$AFK_START" 2>&1)
+  status=$?
+  assert_not_contains "$out" "refusing to start the daemon here" \
+    "a backend with no native agent state must not refuse an in-pane start"
+  assert_contains "$out" "starting supervise daemon" \
+    "the tmux in-pane start must still reach daemon startup"
+  assert_contains "$out" "does not resolve to a tmux pane" \
+    "the daemon must have probed make_supercase's fake tmux, not whatever tmux the machine happens to run"
+  assert_present "$state/.afk" \
+    "the tmux in-pane start must still arm away mode"
+
+  # DIVERGENCE 2: native-busy backend, but the supervisor target is a pane other
+  # than this process's own - the separate-terminal arrangement that works.
+  dir=$(make_supercase afk-start-foreign-target-herdr)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  out=$(PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$dir/herdr-calls" \
+    FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p1 HERDR_SESSION=default TMUX_PANE='' \
+    "$AFK_START" 2>&1)
+  status=$?
+  assert_not_contains "$out" "refusing to start the daemon here" \
+    "supervising a pane other than its own must not refuse"
+  assert_contains "$out" "starting supervise daemon" \
+    "the foreign-target start must reach daemon startup"
+  assert_present "$state/.afk" \
+    "the foreign-target start must arm away mode"
+
+  pass "fm-afk-start.sh clears pre-existing away mode when refusing self-supervision, and refuses only then"
+}
+
+# The self-supervision refusal judges a LAUNCH arrangement, so it must not fire
+# on a refresh of an away session that is already supervised correctly: the
+# launcher hosts the daemon in its own terminal, and an in-pane
+# bin/fm-afk-start.sh is then the idempotent "already running" no-op. Reporting a
+# refusal there would tell the captain the opposite of the actual supervision
+# state, so this pins the ordering against the exact constellation that produced
+# it - own pane, native-busy backend, live lock holder.
+test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
+  local case_dir case_state sleeper_pid out status
+
+  case_dir=$(make_supercase afk-start-refresh-live-daemon)
+  case_state="$case_dir/state"
+  date '+%s' > "$case_state/.afk"
+  sleep 30 & sleeper_pid=$!
+  mkdir -p "$case_state/.supervise-daemon.lock"
+  printf '%s' "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity" )
+
+  out=$(PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 \
+    HERDR_SESSION=default TMUX_PANE='' "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -eq 0 ] \
+    || fail "an in-pane refresh of a correctly supervised away session must exit 0, got $status: $out"
+  assert_contains "$out" "daemon already running pid=$sleeper_pid" \
+    "the refresh must report the live daemon it found"
+  assert_not_contains "$out" "refusing to start the daemon here" \
+    "the refresh must not claim away mode was not entered while a daemon supervises"
+  assert_present "$case_state/.afk" \
+    "the refresh must leave away mode armed"
+
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  pass "fm-afk-start.sh reports an already-running daemon idempotently instead of refusing the pane it runs in"
+}
+
+test_afk_start_revalidates_live_daemon_before_refresh_success() {
+  local case_dir case_state sleeper_pid start_pid out status pending waited=0
+
+  case_dir=$(make_supercase afk-start-refresh-daemon-exits)
+  case_state="$case_dir/state"
+  date '+%s' > "$case_state/.afk"
+  sleep 30 & sleeper_pid=$!
+  mkdir -p "$case_state/.supervise-daemon.lock" "$case_state/.cursor-park-owner.lock"
+  printf '%s' "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity" )
+  printf '%s' "$$" > "$case_state/.cursor-park-owner.lock/pid"
+
+  PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE='' \
+    "$AFK_START" > "$case_dir/start.out" 2>&1 &
+  start_pid=$!
+
+  pending=
+  while [ "$waited" -lt 50 ]; do
+    for pending in "$case_state"/.afk.pending.*; do
+      [ -e "$pending" ] && break 2
+      pending=
+    done
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ -z "$pending" ]; then
+    kill "$start_pid" "$sleeper_pid" 2>/dev/null || true
+    wait "$start_pid" 2>/dev/null || true
+    wait "$sleeper_pid" 2>/dev/null || true
+    fail "fm-afk-start.sh did not reach its blocked away-mode refresh"
+  fi
+
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  rm -rf "$case_state/.cursor-park-owner.lock"
+  wait "$start_pid"
+  status=$?
+  out=$(cat "$case_dir/start.out")
+
+  [ "$status" -ne 0 ] \
+    || fail "a refresh whose daemon exited before success must fail: $out"
+  assert_contains "$out" "refusing to start the daemon here" \
+    "the vanished daemon must route through the ordinary no-live refusal"
+  assert_not_contains "$out" "daemon already running" \
+    "the refresh reported success from a stale daemon-liveness snapshot"
+  assert_absent "$case_state/.afk" \
+    "the stale refresh left away mode armed without a live daemon"
+
+  pass "fm-afk-start.sh revalidates daemon liveness before reporting refresh success"
+}
+
+# The same revalidation must protect the LAUNCHER-PREPARED entry, which skips
+# the flag write and so has no natural blocking point of its own. Here the
+# holder disappears after the liveness snapshot and before the success report;
+# the entry must not report the daemon it no longer has. The prepared path does
+# not clear the launcher-written flag (that is the launcher's), so the honest
+# outcome is falling through to the daemon, whose startup backstop refuses
+# audibly. The lock's pid-identity is a FIFO so the test, not a sleep, decides
+# when each liveness read completes: the writer is unblocked only once the real
+# entry opens it, and the holder is killed while the second read is still open.
+test_afk_start_prepared_entry_revalidates_live_daemon_before_refresh_success() {
+  local case_dir case_state fakebin case_lock identity sleeper_pid start_pid watchdog_pid out status
+
+  case_dir=$(make_supercase afk-start-prepared-daemon-exits)
+  case_state="$case_dir/state"
+  fakebin=$(daemon_startup_fakebin "$case_dir")
+  case_lock="$case_state/.supervise-daemon.lock"
+  date '+%s' > "$case_state/.afk"
+  sleep 30 & sleeper_pid=$!
+  identity=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" )
+  mkdir -p "$case_lock"
+  printf '%s' "$sleeper_pid" > "$case_lock/pid"
+  mkfifo "$case_lock/pid-identity"
+
+  PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$case_dir/herdr-calls" \
+    FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
+    FM_AFK_STATE_PREPARED=1 \
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE='' \
+    "$AFK_START" > "$case_dir/start.out" 2>&1 &
+  start_pid=$!
+
+  # Read 1 - the pre-write snapshot. Opening for write blocks until the entry
+  # opens the FIFO for reading, so this returns only once it is at that check.
+  exec 9>"$case_lock/pid-identity"
+  printf '%s\n' "$identity" >&9
+  exec 9>&-
+
+  # An entry that never revalidates exits without a second read, so nothing
+  # would ever open the FIFO and the blocking write below would hang instead of
+  # failing. This watchdog drains it once the entry is gone, turning that into
+  # the ordinary assertion failure on the exit status and output.
+  ( while kill -0 "$start_pid" 2>/dev/null; do sleep 0.1; done
+    [ -p "$case_lock/pid-identity" ] && cat "$case_lock/pid-identity" >/dev/null 2>&1
+    exit 0 ) &
+  watchdog_pid=$!
+
+  # Read 2 - the revalidation before the success report. Open first, then kill
+  # the holder while the entry is still blocked on the read, then close so the
+  # read completes: the identity comparison cannot run before the daemon died.
+  exec 9>"$case_lock/pid-identity"
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+  rm -f "$case_lock/pid-identity"
+  printf '%s\n' "$identity" > "$case_lock/pid-identity"
+  exec 9>&-
+
+  wait "$start_pid"
+  status=$?
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  out=$(cat "$case_dir/start.out")
+
+  [ "$status" -ne 0 ] \
+    || fail "a prepared refresh whose daemon exited before success must fail: $out"
+  assert_not_contains "$out" "daemon already running" \
+    "the prepared entry reported success from a stale daemon-liveness snapshot"
+  assert_contains "$out" "is this daemon's own pane" \
+    "the vanished holder must fall through to the daemon's own startup refusal"
+
+  pass "fm-afk-start.sh revalidates daemon liveness on the launcher-prepared entry too"
+}
+
+# --help is the operator-facing contract for this entry: it must name the
+# in-pane refusal, its exit, and that a pre-existing away-mode flag is removed,
+# because that outcome is destructive on the documented recovery re-entry.
+test_afk_start_help_documents_the_in_pane_refusal() {
+  local out status
+
+  out=$("$AFK_START" --help 2>&1)
+  status=$?
+
+  [ "$status" -eq 0 ] || fail "fm-afk-start.sh --help must exit 0, got $status: $out"
+  assert_contains "$out" "REFUSES" \
+    "--help must tell the operator that an in-pane start on such a backend refuses"
+  assert_contains "$out" "REMOVES any pre-existing" \
+    "--help must name the removal of an existing away-mode flag"
+  assert_contains "$out" "exits 1" \
+    "--help must name the refusal's exit status"
+  assert_contains "$out" "fm-afk-launch.sh start" \
+    "--help must point at the launch that works instead"
+
+  pass "fm-afk-start.sh --help documents the in-pane refusal, its exit, and the flag removal"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -1760,6 +2013,142 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
+test_discover_own_pane_target_is_env_only() {
+  local out
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='%7' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_own_pane_target)
+  [ "$out" = '%7' ] \
+    || fail "own pane must come from TMUX_PANE, never from FM_SUPERVISOR_TARGET: $out"
+
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_own_pane_target)
+  [ "$out" = 'iso1:w1:p9' ] \
+    || fail "own pane under herdr must compose '<session>:<pane-id>' from this process's env: $out"
+
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_own_pane_target)
+  [ "$out" = 'default:w1:p9' ] \
+    || fail "own pane under herdr must default the session to 'default': $out"
+
+  if out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_own_pane_target); then
+    fail "a process in no recognized pane must return non-zero, got: $out"
+  fi
+  [ -z "$out" ] || fail "a process in no recognized pane must print nothing: $out"
+
+  pass "discover_own_pane_target: TMUX_PANE > herdr env composition > nothing, ignoring FM_SUPERVISOR_TARGET"
+}
+
+# --- self-supervision refusal (real daemon process, no harness) --------------
+# A daemon hosted in the pane it supervises is part of that pane's native agent
+# state, so on a backend that reports one it reads its own presence as a busy
+# supervisor and defers every escalation until away mode ends. These cases run
+# the real bin/fm-supervise-daemon.sh startup as a process and drive the two
+# signals apart - own pane vs foreign target, native-busy backend vs not - so a
+# pass cannot come from the refusal firing (or never firing) unconditionally.
+# The herdr stub only records that it was called and fails, so no real herdr
+# server is contacted and the ordering claim stays observable rather than assumed.
+daemon_startup_attempt() {  # <state> <fakebin> [VAR=value...]
+  local state=$1 fakebin=$2
+  shift 2
+  local pid waited=0
+  DAEMON_STARTUP_ERR="$state/startup.err"
+  ( PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" env "$@" "$DAEMON" \
+      >"$state/startup.out" 2>"$DAEMON_STARTUP_ERR" ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 150 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    DAEMON_STARTUP_STATUS=timeout
+  else
+    wait "$pid"
+    DAEMON_STARTUP_STATUS=$?
+  fi
+}
+
+daemon_startup_fakebin() {  # <dir> -> fakebin holding a call-logging herdr stub
+  local dir=$1
+  local fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_HERDR_CALLS"
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+  printf '%s\n' "$fakebin"
+}
+
+test_daemon_refuses_to_supervise_its_own_pane_on_native_busy_backend() {
+  local dir state fakebin calls err
+
+  dir=$(make_supercase daemon-self-supervision)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  calls="$dir/herdr-calls"
+  : > "$calls"
+
+  # Own pane IS the supervisor target on a backend with native agent state.
+  daemon_startup_attempt "$state" "$fakebin" \
+    FM_TEST_HERDR_CALLS="$calls" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE=
+  err=$(cat "$DAEMON_STARTUP_ERR")
+  [ "$DAEMON_STARTUP_STATUS" != timeout ] \
+    || fail "the daemon kept running while supervising its own pane on a native-busy backend"
+  [ "$DAEMON_STARTUP_STATUS" -ne 0 ] \
+    || fail "the daemon must exit non-zero rather than supervise its own pane: $err"
+  assert_contains "$err" "is this daemon's own pane" \
+    "the refusal must name self-supervision as the reason"
+  assert_contains "$err" "fm-afk-launch.sh start" \
+    "the refusal must name the separate-terminal launch that works instead"
+  [ ! -s "$calls" ] \
+    || fail "the refusal must precede every backend probe, but herdr was called: $(cat "$calls")"
+  assert_absent "$state/.supervise-daemon.lock" \
+    "the refusing daemon must release its singleton lock so the correct launch can proceed"
+  assert_absent "$state/.supervise-daemon.pid" \
+    "the refusing daemon must not leave a pid file behind"
+
+  # DIVERGENCE 1: same own pane, backend WITHOUT native agent state. The daemon
+  # must fall through to the ordinary target probe instead of refusing.
+  dir=$(make_supercase daemon-self-supervision-tmux)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  calls="$dir/herdr-calls"
+  : > "$calls"
+  daemon_startup_attempt "$state" "$fakebin" \
+    FM_TEST_HERDR_CALLS="$calls" FM_FAKE_TMUX_PANE_ALIVE=0 \
+    FM_SUPERVISOR_BACKEND=tmux TMUX_PANE='%4'
+  err=$(cat "$DAEMON_STARTUP_ERR")
+  [ "$DAEMON_STARTUP_STATUS" != timeout ] \
+    || fail "the tmux divergence case never finished startup"
+  assert_not_contains "$err" "is this daemon's own pane" \
+    "a backend with no native agent state must not trigger the self-supervision refusal"
+  assert_contains "$err" "does not resolve to a tmux pane" \
+    "the tmux case must fail on the ordinary target probe, proving the refusal was skipped"
+
+  # DIVERGENCE 2: native-busy backend, but the supervisor target is a DIFFERENT
+  # pane than this process's own - the separate-terminal arrangement that works.
+  dir=$(make_supercase daemon-foreign-target-herdr)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  calls="$dir/herdr-calls"
+  : > "$calls"
+  daemon_startup_attempt "$state" "$fakebin" \
+    FM_TEST_HERDR_CALLS="$calls" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p1 HERDR_SESSION=default TMUX_PANE=
+  err=$(cat "$DAEMON_STARTUP_ERR")
+  [ "$DAEMON_STARTUP_STATUS" != timeout ] \
+    || fail "the foreign-target herdr case never finished startup"
+  assert_not_contains "$err" "is this daemon's own pane" \
+    "supervising a pane other than its own must not trigger the self-supervision refusal"
+  [ -s "$calls" ] \
+    || fail "the foreign-target case must reach the herdr target probe, but herdr was never called"
+
+  pass "daemon startup refuses only self-supervision on a backend that reports native agent state"
+}
+
 test_pane_is_busy_herdr_native_busy_state() {
   local dir
   dir=$(make_supercase primary-herdr-busy)
@@ -1926,6 +2315,11 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_afk_start_refusal_never_leaves_away_mode_armed
+test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch
+test_afk_start_revalidates_live_daemon_before_refresh_success
+test_afk_start_prepared_entry_revalidates_live_daemon_before_refresh_success
+test_afk_start_help_documents_the_in_pane_refusal
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
@@ -2016,6 +2410,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_own_pane_target_is_env_only
+test_daemon_refuses_to_supervise_its_own_pane_on_native_busy_backend
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

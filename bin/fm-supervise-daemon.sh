@@ -173,7 +173,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
-# discover_supervisor_backend). Shared with the script-owned away launcher
+# discover_supervisor_backend, discover_own_pane_target). Shared with the
+# script-owned away launcher
 # (bin/fm-afk-launch.sh) so the captain-pane resolution has exactly one owner.
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
@@ -322,10 +323,12 @@ _collapse_newlines() {  # <text>
   printf '%s' "$s"
 }
 
-# discover_supervisor_target / discover_supervisor_backend are owned by
-# bin/fm-supervisor-target-lib.sh (sourced above). fm_super_main below calls
-# them exactly as before; the away launcher reuses the identical resolution to
-# pass the captain pane in as FM_SUPERVISOR_TARGET.
+# discover_supervisor_target / discover_supervisor_backend / discover_own_pane_target
+# are owned by bin/fm-supervisor-target-lib.sh (sourced above). fm_super_main
+# below calls them exactly as before; the away launcher reuses the identical
+# resolution to pass the captain pane in as FM_SUPERVISOR_TARGET, and the
+# own-pane reading is what lets startup tell a supervised captain pane apart
+# from the daemon's own.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
 # last_status_line, status_is_captain_relevant, window_to_task, and
@@ -1440,6 +1443,22 @@ fm_super_main() {
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"
+
+  # --- refuse to supervise the pane THIS daemon runs in on a backend with
+  # native busy state -------------------------------------------------------
+  # Do not forget: such a daemon reads its own presence as a busy supervisor and
+  # delivers nothing while looking alive (rule and rationale: the header of
+  # bin/fm-afk-launch.sh). This is the backstop for launch paths the launcher
+  # does not mediate. Checked before the target existence probe below: a
+  # self-blocking target is unusable whether or not it resolves, and refusing
+  # first spares a pointless backend round trip.
+  if supervisor_self_supervision_refused "$BACKEND" "$TARGET"; then
+    echo "error: supervisor target '$TARGET' is this daemon's own pane and backend '$BACKEND' reports native agent state; the daemon would read its own presence as a busy supervisor and never deliver an escalation. Launch it with 'bin/fm-afk-launch.sh start', which runs it in a separate non-visible terminal and passes the captain pane in as FM_SUPERVISOR_TARGET" >&2
+    log "startup failed: refusing to supervise own pane '$TARGET' on backend '$BACKEND' with native busy state (source=$target_source)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
   # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`

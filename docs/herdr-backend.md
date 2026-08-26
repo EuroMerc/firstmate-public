@@ -291,11 +291,24 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
-Harnesses with native tracked background execution can run the daemon in their terminal.
-Pi has no such mechanism.
+Under Herdr the away daemon cannot be hosted in the captain's own pane, whatever the harness offers.
+Herdr reports native agent state for that pane, the daemon's busy guard trusts a native busy verdict ahead of any rendered reading, and a daemon running in the pane keeps that state reporting work in progress - so the daemon reads its own presence as a busy supervisor and defers every escalation for as long as it runs.
+The launch path is therefore a supervisor-backend decision rather than a harness one: a harness-native in-pane background job is only available where the backend reports no native agent state, and Pi has no such job to offer on any backend.
 `bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
+That choice is enforced rather than remembered: a `start-native` request redirects to this terminal path on a backend with native agent state, and the daemon separately refuses at startup to supervise the pane it is running in there, so no launch path can arrange the silent self-blocking daemon.
+A direct in-pane `bin/fm-afk-start.sh` refuses the same arrangement before writing a new away-mode flag and clears any pre-existing flag, so a refusal never leaves `state/.afk` set with nothing supervising - which would also stop the ordinary stop-hook watcher from arming.
+An entry whose daemon lock remains live through the refresh is a working session rather than a launch, so it reports the running daemon idempotently instead of judging an arrangement it did not create.
+If that daemon exits before the success report, the lock is revalidated there and both entry forms follow the ordinary no-live path instead of reporting supervision from a stale liveness sample: a direct in-pane entry refuses and clears the flag as above, while a launcher-prepared entry reaches the daemon's own startup backstop, which refuses audibly.
+
+One window stays open here, as a deliberately accepted residual risk rather than an oversight.
+A `FM_AFK_STATE_PREPARED=1` entry trusts the launcher's already-written `state/.afk` and performs no launch-arrangement check of its own.
+So if the redirected launch succeeds and the daemon then dies before the caller's follow-on prepared entry, that entry finds `state/.afk` present and no live lock holder, and execs the daemon in the captain's own pane, where the startup backstop refuses - leaving away mode armed with nothing supervising.
+The gap predates the backend-decided launch path; that work made it visible rather than introducing it.
+No pre-flight check can close it in principle: lifecycle state and supervision are established by two different processes, and nothing checked before that window can guarantee anything about the time after it.
+The fix has a different shape and belongs in its own task: `state/.afk` should stop counting as proof that supervision exists and be paired with a liveness check, so the state heals itself instead of having to be prevented.
+That touches [`bin/fm-claude-stop-autoarm.sh`](../bin/fm-claude-stop-autoarm.sh) and is out of scope for the launch-path decision recorded here.
 
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.

@@ -241,7 +241,11 @@ test_away_reentry_refuses_pending_return_gate() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config"
   printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
   set +e
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
+  # FM_SUPERVISOR_BACKEND is pinned so this keeps exercising the native path:
+  # on a backend that reports native agent state, start-native redirects to the
+  # separate-terminal path instead (tests/fm-afk-launch.test.sh
+  # unit_native_refused_on_native_busy_backend owns that decision).
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_SUPERVISOR_BACKEND=tmux "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "away re-entry succeeded while return catch-up was pending"
