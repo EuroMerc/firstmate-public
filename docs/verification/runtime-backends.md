@@ -635,6 +635,16 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+Which hosting the daemon may use is decided from a repo-owned backend capability rather than from anything a provider emits, so its regressions need no harness and no Herdr server:
+
+```sh
+tests/fm-backend.test.sh
+tests/fm-afk-launch.test.sh
+tests/fm-daemon.test.sh
+```
+
+They pin the native-agent-state capability list against every known backend, the redirect of an in-pane launch request on a capable backend, and the daemon's refusal to supervise the pane it runs in there, each with the opposite-backend case asserted so a blanket pass cannot satisfy them.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

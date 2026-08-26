@@ -291,11 +291,13 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
-Harnesses with native tracked background execution can run the daemon in their terminal.
-Pi has no such mechanism.
+Under Herdr the away daemon cannot be hosted in the captain's own pane, whatever the harness offers.
+Herdr reports native agent state for that pane, the daemon's busy guard trusts a native busy verdict ahead of any rendered reading, and a daemon running in the pane keeps that state reporting work in progress - so the daemon reads its own presence as a busy supervisor and defers every escalation for as long as it runs.
+The launch path is therefore a supervisor-backend decision rather than a harness one: a harness-native in-pane background job is only available where the backend reports no native agent state, and Pi has no such job to offer on any backend.
 `bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
+That choice is enforced rather than remembered: a `start-native` request redirects to this terminal path on a backend with native agent state, and the daemon separately refuses at startup to supervise the pane it is running in there, so no launch path can arrange the silent self-blocking daemon.
 
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.

@@ -776,17 +776,39 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   esac
 }
 
+# fm_backend_has_native_busy_state: 0 if <backend> answers busy/idle from the
+# provider's OWN agent-state registry instead of from rendered pane output.
+# This predicate is the single owner of that capability list, and
+# fm_backend_busy_state below is gated on it, so no backend can return a native
+# verdict without appearing here.
+#
+# It is a static capability question, not a live probe: no target has to exist
+# and no server round trip is paid, so a caller can ask it while deciding HOW to
+# launch something. The away-mode launcher and daemon need exactly that, because
+# a daemon running inside the pane it supervises is itself part of that pane's
+# native agent state - on a capable backend it reads its own presence as
+# "supervisor busy" and defers every injection for as long as it runs
+# (bin/fm-afk-launch.sh, bin/fm-supervise-daemon.sh).
+fm_backend_has_native_busy_state() {  # <backend>
+  case "$1" in
+    herdr) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state (herdr-addendum "busy state" row - the first backend
-# where this gets real semantics beyond pane-regex). Backends with no such
-# primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
-# uses unknown as the cue for harness-scoped pane-tail detection, while
-# fm-crew-state.sh also corroborates native idle verdicts with the recorded
-# harness's signature before treating a no-run crew as not busy.
+# where this gets real semantics beyond pane-regex). Every backend that
+# fm_backend_has_native_busy_state rejects reports unknown. Callers own the
+# fallback policy: fm-watch.sh uses unknown as the cue for harness-scoped
+# pane-tail detection, while fm-crew-state.sh also corroborates native idle
+# verdicts with the recorded harness's signature before treating a no-run crew
+# as not busy.
 fm_backend_busy_state() {  # <backend> <target>
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  fm_backend_has_native_busy_state "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
     *) printf 'unknown' ;;

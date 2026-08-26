@@ -1760,6 +1760,141 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
+test_discover_own_pane_target_is_env_only() {
+  local out
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='%7' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_own_pane_target)
+  [ "$out" = '%7' ] \
+    || fail "own pane must come from TMUX_PANE, never from FM_SUPERVISOR_TARGET: $out"
+
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_own_pane_target)
+  [ "$out" = 'iso1:w1:p9' ] \
+    || fail "own pane under herdr must compose '<session>:<pane-id>' from this process's env: $out"
+
+  out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_own_pane_target)
+  [ "$out" = 'default:w1:p9' ] \
+    || fail "own pane under herdr must default the session to 'default': $out"
+
+  if out=$(FM_SUPERVISOR_TARGET=explicit:target TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_own_pane_target); then
+    fail "a process in no recognized pane must return non-zero, got: $out"
+  fi
+  [ -z "$out" ] || fail "a process in no recognized pane must print nothing: $out"
+
+  pass "discover_own_pane_target: TMUX_PANE > herdr env composition > nothing, ignoring FM_SUPERVISOR_TARGET"
+}
+
+# --- self-supervision refusal (real daemon process, no harness) --------------
+# A daemon hosted in the pane it supervises is part of that pane's native agent
+# state, so on a backend that reports one it reads its own presence as a busy
+# supervisor and defers every escalation until away mode ends. These cases run
+# the real bin/fm-supervise-daemon.sh startup as a process and drive the two
+# signals apart - own pane vs foreign target, native-busy backend vs not - so a
+# pass cannot come from the refusal firing (or never firing) unconditionally.
+# The herdr stub only records that it was called and fails, so no real herdr
+# server is contacted and the ordering claim stays observable rather than assumed.
+daemon_startup_attempt() {  # <state> <fakebin> [VAR=value...]
+  local state=$1 fakebin=$2
+  shift 2
+  local pid waited=0
+  DAEMON_STARTUP_ERR="$state/startup.err"
+  ( PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" env "$@" "$DAEMON" \
+      >"$state/startup.out" 2>"$DAEMON_STARTUP_ERR" ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 150 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    DAEMON_STARTUP_STATUS=timeout
+  else
+    wait "$pid"
+    DAEMON_STARTUP_STATUS=$?
+  fi
+}
+
+daemon_startup_fakebin() {  # <dir> -> fakebin holding a call-logging herdr stub
+  local dir=$1
+  local fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_HERDR_CALLS"
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+  printf '%s\n' "$fakebin"
+}
+
+test_daemon_refuses_to_supervise_its_own_pane_on_native_busy_backend() {
+  local dir state fakebin calls err
+
+  dir=$(make_supercase daemon-self-supervision)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  calls="$dir/herdr-calls"
+  : > "$calls"
+
+  # Own pane IS the supervisor target on a backend with native agent state.
+  daemon_startup_attempt "$state" "$fakebin" \
+    FM_TEST_HERDR_CALLS="$calls" FM_SUPERVISOR_BACKEND=herdr \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE=
+  err=$(cat "$DAEMON_STARTUP_ERR")
+  [ "$DAEMON_STARTUP_STATUS" != timeout ] \
+    || fail "the daemon kept running while supervising its own pane on a native-busy backend"
+  [ "$DAEMON_STARTUP_STATUS" -ne 0 ] \
+    || fail "the daemon must exit non-zero rather than supervise its own pane: $err"
+  assert_contains "$err" "is this daemon's own pane" \
+    "the refusal must name self-supervision as the reason"
+  assert_contains "$err" "fm-afk-launch.sh start" \
+    "the refusal must name the separate-terminal launch that works instead"
+  [ ! -s "$calls" ] \
+    || fail "the refusal must precede every backend probe, but herdr was called: $(cat "$calls")"
+  assert_absent "$state/.supervise-daemon.lock" \
+    "the refusing daemon must release its singleton lock so the correct launch can proceed"
+  assert_absent "$state/.supervise-daemon.pid" \
+    "the refusing daemon must not leave a pid file behind"
+
+  # DIVERGENCE 1: same own pane, backend WITHOUT native agent state. The daemon
+  # must fall through to the ordinary target probe instead of refusing.
+  dir=$(make_supercase daemon-self-supervision-tmux)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  calls="$dir/herdr-calls"
+  : > "$calls"
+  daemon_startup_attempt "$state" "$fakebin" \
+    FM_TEST_HERDR_CALLS="$calls" FM_FAKE_TMUX_PANE_ALIVE=0 \
+    FM_SUPERVISOR_BACKEND=tmux TMUX_PANE='%4'
+  err=$(cat "$DAEMON_STARTUP_ERR")
+  [ "$DAEMON_STARTUP_STATUS" != timeout ] \
+    || fail "the tmux divergence case never finished startup"
+  assert_not_contains "$err" "is this daemon's own pane" \
+    "a backend with no native agent state must not trigger the self-supervision refusal"
+  assert_contains "$err" "does not resolve to a tmux pane" \
+    "the tmux case must fail on the ordinary target probe, proving the refusal was skipped"
+
+  # DIVERGENCE 2: native-busy backend, but the supervisor target is a DIFFERENT
+  # pane than this process's own - the separate-terminal arrangement that works.
+  dir=$(make_supercase daemon-foreign-target-herdr)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  calls="$dir/herdr-calls"
+  : > "$calls"
+  daemon_startup_attempt "$state" "$fakebin" \
+    FM_TEST_HERDR_CALLS="$calls" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p1 HERDR_SESSION=default TMUX_PANE=
+  err=$(cat "$DAEMON_STARTUP_ERR")
+  [ "$DAEMON_STARTUP_STATUS" != timeout ] \
+    || fail "the foreign-target herdr case never finished startup"
+  assert_not_contains "$err" "is this daemon's own pane" \
+    "supervising a pane other than its own must not trigger the self-supervision refusal"
+  [ -s "$calls" ] \
+    || fail "the foreign-target case must reach the herdr target probe, but herdr was never called"
+
+  pass "daemon startup refuses only self-supervision on a backend that reports native agent state"
+}
+
 test_pane_is_busy_herdr_native_busy_state() {
   local dir
   dir=$(make_supercase primary-herdr-busy)
@@ -2016,6 +2151,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_own_pane_target_is_env_only
+test_daemon_refuses_to_supervise_its_own_pane_on_native_busy_backend
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

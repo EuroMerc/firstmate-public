@@ -21,31 +21,48 @@
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
-# discover_supervisor_target: resolve the pane running firstmate. Priority:
-#   1. FM_SUPERVISOR_TARGET env (explicit override) - may be a tmux target or a
-#      herdr "<session>:<pane-id>" target (paired with discover_supervisor_backend
-#      to know which).
-#   2. $TMUX_PANE - tmux sets this in every pane's environment; inherited by a
-#      process launched from firstmate's own pane.
-#   3. $HERDR_ENV=1 + $HERDR_PANE_ID - herdr injects both into every process it
+# discover_own_pane_target: the pane THIS process is running in, resolved from
+# its own inherited terminal env and never from FM_SUPERVISOR_TARGET. Priority:
+#   1. $TMUX_PANE - tmux sets this in every pane's environment; inherited by a
+#      process launched from that pane.
+#   2. $HERDR_ENV=1 + $HERDR_PANE_ID - herdr injects both into every process it
 #      manages a pane for; compose the "<session>:<pane-id>" target from
 #      $HERDR_SESSION (defaulting to "default", mirroring bin/backends/herdr.sh's
 #      fm_backend_herdr_session) and $HERDR_PANE_ID. Checked after $TMUX_PANE so a
 #      tmux pane nested inside herdr still resolves to tmux, matching
 #      fm_backend_detect's innermost-first rule.
-#   4. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
-#      session is named differently). Returns 1 so the caller can warn.
-discover_supervisor_target() {
-  if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
-    printf '%s' "$FM_SUPERVISOR_TARGET"
-    return 0
-  fi
+# Prints nothing and returns 1 when neither provider names a pane for this
+# process. The away-mode daemon compares this against its resolved supervisor
+# target so it can refuse to supervise its own pane on a backend whose native
+# busy state its own presence would set (bin/fm-supervise-daemon.sh).
+discover_own_pane_target() {
   if [ -n "${TMUX_PANE:-}" ]; then
     printf '%s' "$TMUX_PANE"
     return 0
   fi
   if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
     printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
+    return 0
+  fi
+  return 1
+}
+
+# discover_supervisor_target: resolve the pane running firstmate. Priority:
+#   1. FM_SUPERVISOR_TARGET env (explicit override) - may be a tmux target or a
+#      herdr "<session>:<pane-id>" target (paired with discover_supervisor_backend
+#      to know which).
+#   2. discover_own_pane_target - the pane this process itself runs in, which for
+#      a process launched from firstmate's own pane IS firstmate's pane.
+#   3. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
+#      session is named differently). Returns 1 so the caller can warn.
+discover_supervisor_target() {
+  local own
+  if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
+    printf '%s' "$FM_SUPERVISOR_TARGET"
+    return 0
+  fi
+  if own=$(discover_own_pane_target); then
+    printf '%s' "$own"
     return 0
   fi
   printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"

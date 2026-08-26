@@ -483,12 +483,16 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
+# FM_SUPERVISOR_BACKEND is pinned because the native launch path is only
+# available on a backend with no native agent state; leaving it to ambient
+# TMUX_PANE/HERDR_ENV would make this case depend on which runtime is running
+# the suite (see unit_native_refused_on_native_busy_backend).
 unit_native_lifecycle() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
@@ -502,6 +506,71 @@ unit_native_lifecycle() {
   else
     fail "native lifecycle: uniform stop retained state"
   fi
+  rm -rf "$st"
+}
+
+# The launch path is a BACKEND decision, not a harness one. Where the supervisor
+# backend reports native agent state, a daemon hosted in the captain's pane is
+# part of that pane's own state and reads itself as a busy supervisor, so
+# start-native must not deliver the in-pane arrangement even when asked for it.
+# Both halves run the real launcher as a process with only the backend differing,
+# so neither outcome can come from a blanket refusal or a blanket pass. The herdr
+# stub records every call and fails, proving no herdr server is contacted.
+unit_native_refused_on_native_busy_backend() {
+  local st fakebin calls out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-busy.XXXXXX")
+  mkdir -p "$st/state" "$st/fakebin"
+  fakebin="$st/fakebin"
+  calls="$st/herdr-calls"
+  : > "$calls"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_HERDR_CALLS"
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+
+  # Backend WITHOUT native agent state: the in-pane arrangement stays available.
+  out=$(PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$calls" FM_HOME="$st" \
+    FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_BACKEND=tmux \
+    FM_SUPERVISOR_TARGET=captain-pane "$LAUNCH" start-native 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ] && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ]; then
+    pass "native launch path: a backend with no native agent state still records the no-terminal mode"
+  else
+    fail "native launch path: tmux supervisor backend should keep the no-terminal mode (status=$status): $out"
+  fi
+  PATH="$fakebin:$PATH" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+
+  # Backend WITH native agent state: the same request must not yield that mode.
+  # The colon-less captain target makes the redirected terminal path fail at its
+  # own session derivation, so this case never needs a herdr server to prove the
+  # decision.
+  out=$(PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$calls" FM_HOME="$st" \
+    FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=captain-pane "$LAUNCH" start-native 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    fail "native launch path: start-native must not succeed into an in-pane daemon on a native-busy backend: $out"
+  fi
+  case "$out" in
+    *"reports native busy state"*) : ;;
+    *) fail "native launch path: the redirect must say why the in-pane daemon was rejected: $out" ;;
+  esac
+  case "$out" in
+    *"cannot derive herdr session"*) : ;;
+    *) fail "native launch path: start-native must reach the separate-terminal path, not the native one: $out" ;;
+  esac
+  if [ -e "$st/state/.afk-daemon-terminal" ]; then
+    fail "native launch path: no terminal record may survive the failed redirect: $(cat "$st/state/.afk-daemon-terminal")"
+  fi
+  if [ -e "$st/state/.afk" ]; then
+    fail "native launch path: away mode must roll back when the redirected launch fails"
+  fi
+  if [ -s "$calls" ]; then
+    fail "native launch path: no herdr server may be contacted by this case: $(cat "$calls")"
+  fi
+  pass "native launch path: a native-busy supervisor backend redirects start-native to the separate terminal"
   rm -rf "$st"
 }
 
@@ -941,6 +1010,7 @@ unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
+unit_native_refused_on_native_busy_backend
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
