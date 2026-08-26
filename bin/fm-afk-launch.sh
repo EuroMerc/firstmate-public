@@ -155,8 +155,13 @@ fm_afk_launch_lock_release() {
   rm -rf "$FM_AFK_LAUNCH_LOCK"
 }
 
+# Print the whole header comment block, stopping at the "Test seam:" paragraph
+# (implementation detail, not usage). Anchored to the block itself rather than a
+# line number, which silently truncated the usage text mid-sentence whenever the
+# header grew.
 fm_afk_launch_usage() {
-  sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 { if (!/^#/ || /^# Test seam:/) exit; sub(/^# ?/, ""); print }' \
+    "${BASH_SOURCE[0]}"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -539,13 +544,10 @@ fm_afk_launch_start() {
 
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0 captain_backend
-  # The launch path is a BACKEND question, not a harness one. A daemon hosted in
-  # the captain's own pane is part of that pane's native agent state wherever the
-  # backend reports one, so it reads itself as "supervisor busy" and defers every
-  # escalation for the whole away stretch. Redirect to the non-visible terminal
-  # path - the same one a harness with no background tool takes - so the unsafe
-  # in-pane arrangement cannot be reached from here even when the caller asks for
-  # it. A capable backend with no terminal primitive still refuses loudly there.
+  # Redirect instead of refusing, so the unsafe in-pane arrangement cannot be
+  # reached from here even when the caller asks for it (rule and rationale: this
+  # file's header). A capable backend with no terminal primitive still refuses
+  # loudly on that path.
   captain_backend=$(discover_supervisor_backend) || true
   if fm_backend_has_native_busy_state "$captain_backend"; then
     fm_afk_launch_log "backend '$captain_backend' reports native busy state; an in-pane daemon would read itself as busy and defer every escalation, so launching it in a separate non-visible terminal instead"

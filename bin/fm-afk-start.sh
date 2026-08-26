@@ -23,7 +23,10 @@
 # by bin/fm-afk-launch.sh, whose header owns that rule and its rationale; do not
 # re-derive it here. A launcher-prepared start reaches this file with
 # FM_AFK_STATE_PREPARED=1 and an already-resolved FM_SUPERVISOR_TARGET, while an
-# in-pane start lets the daemon auto-discover the captain pane it inherits.
+# in-pane start lets the daemon auto-discover the captain pane it inherits. Such
+# an in-pane start refuses BEFORE arming away mode when that arrangement is the
+# self-blocking one (supervisor_self_supervision_refused), so a refusal never
+# leaves state/.afk set with nothing supervising.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
@@ -38,9 +41,18 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$FM_AFK_START_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_AFK_START_DIR/fm-supervisor-target-lib.sh"
 
+# Print the operator-facing part of the header block, stopping at the
+# "This file is sourceable" paragraph (implementation detail, not usage).
+# Anchored to the block itself rather than a line number, which truncates the
+# text mid-sentence as soon as the header above it grows.
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 { if (!/^#/ || /^# This file is sourceable/) exit; sub(/^# ?/, ""); print }' \
+    "${BASH_SOURCE[0]}"
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
@@ -138,6 +150,19 @@ fm_afk_start_main() {
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
+    # Refuse BEFORE the flag write, never after: the daemon rejects this same
+    # arrangement at startup, and a refusal that has already armed away mode
+    # leaves state/.afk set with nothing supervising - bin/fm-claude-stop-autoarm.sh
+    # then hands the watcher to away supervision that is not running, so nobody
+    # watches and nothing says so. Rule and rationale: the header of
+    # bin/fm-afk-launch.sh.
+    local start_backend start_target
+    start_backend=$(discover_supervisor_backend) || true
+    start_target=$(discover_supervisor_target) || true
+    if supervisor_self_supervision_refused "$start_backend" "$start_target"; then
+      echo "afk: refusing to start the daemon here: this pane is supervisor target '$start_target' and backend '$start_backend' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode was NOT entered; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal" >&2
+      return 1
+    fi
     fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
   fi
 

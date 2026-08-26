@@ -1446,19 +1446,13 @@ fm_super_main() {
 
   # --- refuse to supervise the pane THIS daemon runs in on a backend with
   # native busy state -------------------------------------------------------
-  # On such a backend the daemon's own presence in the pane is part of that
-  # pane's agent state, so pane_is_busy trusts a native "busy" that the daemon
-  # itself sets and defers every escalation until away mode ends. Refusing here
-  # is immediately visible in the pane that tried it; a self-blocked daemon
-  # looks alive and silently delivers nothing. bin/fm-afk-launch.sh's
-  # `start-native` already redirects to a separate non-visible terminal, so this
-  # is the backstop for every other launch path. Checked before the target
-  # existence probe below: a self-blocking target is unusable whether or not it
-  # resolves, and refusing first spares a pointless backend round trip.
-  local own_pane
-  own_pane=$(discover_own_pane_target) || own_pane=""
-  if [ -n "$own_pane" ] && [ "$own_pane" = "$TARGET" ] \
-    && fm_backend_has_native_busy_state "$BACKEND"; then
+  # Do not forget: such a daemon reads its own presence as a busy supervisor and
+  # delivers nothing while looking alive (rule and rationale: the header of
+  # bin/fm-afk-launch.sh). This is the backstop for launch paths the launcher
+  # does not mediate. Checked before the target existence probe below: a
+  # self-blocking target is unusable whether or not it resolves, and refusing
+  # first spares a pointless backend round trip.
+  if supervisor_self_supervision_refused "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' is this daemon's own pane and backend '$BACKEND' reports native agent state; the daemon would read its own presence as a busy supervisor and never deliver an escalation. Launch it with 'bin/fm-afk-launch.sh start', which runs it in a separate non-visible terminal and passes the captain pane in as FM_SUPERVISOR_TARGET" >&2
     log "startup failed: refusing to supervise own pane '$TARGET' on backend '$BACKEND' with native busy state (source=$target_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true

@@ -34,8 +34,8 @@ batched digest rather than per-wake injections.
      The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
-   Do not reason this out from the harness alone: an in-pane daemon on a backend with native agent state becomes part of its own supervisor pane's state and defers every escalation for the whole away stretch (docs/herdr-backend.md "Away-mode supervisor support").
-   `start-native` enforces this itself - it redirects to the terminal path on such a backend, and the daemon refuses at startup to supervise the pane it runs in there - so a wrong pick is corrected rather than delivered.
+   Do not reason this out from the harness alone; the reason the backend decides is owned by docs/herdr-backend.md "Away-mode supervisor support".
+   A wrong pick is corrected rather than delivered: `start-native` redirects to the terminal path on such a backend, and an in-pane daemon entry refuses there instead of arming away mode.
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.

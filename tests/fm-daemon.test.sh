@@ -77,6 +77,69 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+# A refusal must never leave away mode armed with nothing supervising: with
+# state/.afk present, bin/fm-claude-stop-autoarm.sh hands the watcher to away
+# supervision, so an armed flag plus a daemon that refused to run means nobody
+# watches at all and nothing reports it. The in-pane entry therefore refuses
+# BEFORE it arms away mode. Both divergence cases run the same real entry with
+# only one signal changed, so a pass cannot come from a blanket refusal.
+test_afk_start_refusal_never_leaves_away_mode_armed() {
+  local dir state fakebin out status
+
+  dir=$(make_supercase afk-start-self-supervision)
+  state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_SESSION=default TMUX_PANE= \
+    "$AFK_START" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "fm-afk-start.sh entered away mode in the pane the daemon would refuse to supervise: $out"
+  assert_contains "$out" "refusing to start the daemon here" \
+    "the refusal must announce itself instead of failing quietly"
+  assert_contains "$out" "fm-afk-launch.sh start" \
+    "the refusal must name the launch that works instead"
+  assert_absent "$state/.afk" \
+    "the refused entry armed away mode with no daemon supervising - the stop hook would now arm no watcher either"
+  assert_not_contains "$out" "starting supervise daemon" \
+    "the refused entry still execed the daemon"
+  assert_absent "$state/.supervise-daemon.lock" \
+    "the refused entry left a daemon lock behind"
+
+  # DIVERGENCE 1: same own pane, backend WITHOUT native agent state. Away mode
+  # must be entered and the daemon attempted as before.
+  dir=$(make_supercase afk-start-own-pane-tmux)
+  state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux TMUX_PANE='%9' \
+    FM_FAKE_TMUX_PANE_ALIVE=0 "$AFK_START" 2>&1)
+  status=$?
+  assert_not_contains "$out" "refusing to start the daemon here" \
+    "a backend with no native agent state must not refuse an in-pane start"
+  assert_contains "$out" "starting supervise daemon" \
+    "the tmux in-pane start must still reach daemon startup"
+  assert_present "$state/.afk" \
+    "the tmux in-pane start must still arm away mode"
+
+  # DIVERGENCE 2: native-busy backend, but the supervisor target is a pane other
+  # than this process's own - the separate-terminal arrangement that works.
+  dir=$(make_supercase afk-start-foreign-target-herdr)
+  state="$dir/state"
+  fakebin=$(daemon_startup_fakebin "$dir")
+  out=$(PATH="$fakebin:$PATH" FM_TEST_HERDR_CALLS="$dir/herdr-calls" \
+    FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=herdr \
+    FM_SUPERVISOR_TARGET=default:w1:p1 \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p1 HERDR_SESSION=default TMUX_PANE= \
+    "$AFK_START" 2>&1)
+  status=$?
+  assert_not_contains "$out" "refusing to start the daemon here" \
+    "supervising a pane other than its own must not refuse"
+  assert_contains "$out" "starting supervise daemon" \
+    "the foreign-target start must reach daemon startup"
+  assert_present "$state/.afk" \
+    "the foreign-target start must arm away mode"
+
+  pass "fm-afk-start.sh refuses self-supervision before arming away mode, and only then"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -2061,6 +2124,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_afk_start_refusal_never_leaves_away_mode_armed
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

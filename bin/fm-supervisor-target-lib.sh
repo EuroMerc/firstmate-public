@@ -50,6 +50,21 @@ discover_own_pane_target() {
   return 1
 }
 
+# supervisor_self_supervision_refused: true when <target> is the pane THIS
+# process runs in AND <backend> reports native agent state - the self-blocking
+# arrangement bin/fm-afk-launch.sh's header owns the rule and rationale for.
+# Every caller that must reject it (the daemon's startup backstop, the away
+# entry's pre-flight) asks here, so the composed rule has one owner too.
+# Requires bin/fm-backend.sh (fm_backend_has_native_busy_state) to be sourced,
+# as every caller of this file already does.
+supervisor_self_supervision_refused() {  # <backend> <target>
+  local own
+  own=$(discover_own_pane_target) || return 1
+  [ -n "$own" ] || return 1
+  [ "$own" = "$2" ] || return 1
+  fm_backend_has_native_busy_state "$1"
+}
+
 # discover_supervisor_target: resolve the pane running firstmate. Priority:
 #   1. FM_SUPERVISOR_TARGET env (explicit override) - may be a tmux target or a
 #      herdr "<session>:<pane-id>" target (paired with discover_supervisor_backend

@@ -784,11 +784,9 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 #
 # It is a static capability question, not a live probe: no target has to exist
 # and no server round trip is paid, so a caller can ask it while deciding HOW to
-# launch something. The away-mode launcher and daemon need exactly that, because
-# a daemon running inside the pane it supervises is itself part of that pane's
-# native agent state - on a capable backend it reads its own presence as
-# "supervisor busy" and defers every injection for as long as it runs
-# (bin/fm-afk-launch.sh, bin/fm-supervise-daemon.sh).
+# launch something. The away-mode launcher and daemon need exactly that when
+# choosing where to host the daemon; the header of bin/fm-afk-launch.sh owns
+# that rule and why this capability decides it.
 fm_backend_has_native_busy_state() {  # <backend>
   case "$1" in
     herdr) return 0 ;;

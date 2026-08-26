@@ -298,6 +298,7 @@ The launch path is therefore a supervisor-backend decision rather than a harness
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 That choice is enforced rather than remembered: a `start-native` request redirects to this terminal path on a backend with native agent state, and the daemon separately refuses at startup to supervise the pane it is running in there, so no launch path can arrange the silent self-blocking daemon.
+A direct in-pane `bin/fm-afk-start.sh` refuses the same arrangement before it arms away mode, so a refusal never leaves `state/.afk` set with nothing supervising - which would also stop the ordinary stop-hook watcher from arming.
 
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
