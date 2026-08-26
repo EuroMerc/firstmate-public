@@ -1,0 +1,12 @@
+$ bin/fm-afk-start.sh  # direct Herdr recovery from the captain pane, with stale .afk present
+afk: refusing to start the daemon here: this pane is supervisor target 'default:w1:p1' and backend 'herdr' reports native agent state, so the daemon would read its own presence as a busy supervisor and never deliver an escalation. Away mode is NOT active; run 'bin/fm-afk-launch.sh start' instead, which hosts the daemon in a separate non-visible terminal
+exit=1
+away_flag=absent
+daemon_lock=absent
+
+$ bin/fm-afk-launch.sh start-native  # Herdr supervisor backend, invalid demo target prevents creating a terminal
+fm-afk-launch: backend 'herdr' reports native busy state; an in-pane daemon would read itself as busy and defer every escalation, so launching it in a separate non-visible terminal instead
+fm-afk-launch: cannot derive herdr session from captain target 'captain-pane'
+exit=1
+away_flag=absent
+terminal_record=absent
