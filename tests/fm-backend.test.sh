@@ -1136,15 +1136,23 @@ test_native_busy_state_capability_is_owned_and_gating() {
       || fail "fm_backend_busy_state must report unknown for non-native backend '$backend': $native"
   done
 
-  # The predicate gates the dispatch, so defining an adapter busy-state function
-  # for a backend the predicate rejects still cannot yield a native verdict.
-  (
-    # shellcheck disable=SC2329 # Reached only through the dispatch under test, which must refuse it.
-    fm_backend_zellij_busy_state() { printf 'busy'; }
-    native=$(fm_backend_busy_state zellij "some-target" 2>/dev/null)
-    [ "$native" = unknown ] \
-      || fail "an adapter busy-state function must not bypass fm_backend_has_native_busy_state: $native"
-  ) || fail "gated-dispatch subshell failed"
+  # The predicate is a NECESSARY condition for the dispatch, not just a label on
+  # it: withdraw it for the one backend that HAS an adapter busy-state function
+  # and that adapter must no longer be reached, so a native verdict cannot come
+  # from anywhere but the owned capability list. Driving this through herdr is
+  # what makes the case non-vacuous - a backend the dispatch has no branch for
+  # would report unknown with or without the gate.
+  native=$(
+    # shellcheck disable=SC2329 # Both overrides are reached only through the dispatch under test.
+    fm_backend_source() { return 0; }
+    # shellcheck disable=SC2329
+    fm_backend_has_native_busy_state() { return 1; }
+    # shellcheck disable=SC2329 # Must NOT be reached once the predicate rejects herdr.
+    fm_backend_herdr_busy_state() { printf 'busy'; }
+    fm_backend_busy_state herdr "some-target" 2>/dev/null
+  )
+  [ "$native" = unknown ] \
+    || fail "an adapter busy-state function must not bypass fm_backend_has_native_busy_state: $native"
 
   pass "fm_backend_has_native_busy_state owns the capability list and gates every native busy verdict"
 }

@@ -10,9 +10,12 @@
 # auto-discover its OWN pane and inject there instead of into the captain's).
 #
 # Because both callers need the identical resolution, it lives here once. The
-# function names and precedence are unchanged from when this logic lived inline
-# in bin/fm-supervise-daemon.sh, so its unit tests (tests/fm-daemon.test.sh)
-# keep exercising the same names after the daemon sources this file.
+# names and precedence both callers already used are unchanged from when this
+# logic lived inline in bin/fm-supervise-daemon.sh, so its unit tests
+# (tests/fm-daemon.test.sh) keep exercising the same names after the daemon
+# sources this file. discover_own_pane_target below is the own-pane half of that
+# same precedence, named so the daemon can compare its resolved target against
+# the pane it is itself running in without a second copy of the rules.
 
 # Default supervisor pane target/backend when nothing is configured or detected.
 # "firstmate:0" is a tmux session:window name, so the bare fallback (nothing
