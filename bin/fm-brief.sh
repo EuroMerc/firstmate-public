@@ -385,7 +385,8 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then make exactly one non-watching \`gh-axi pr checks <number>\` read.
-If checks are pending or no check names are reported yet, end your final visible response with \`External check running | <concrete check names, or external PR checks pending when names are unavailable> | <full canonical PR URL> | since <Europe/Berlin local time with CET/CEST> | worker finished and healthy\`.
+Immediately before the final response, obtain its display time from \`TZ=Europe/Berlin date '+%Y-%m-%d %H:%M %Z'\`; do not infer the zone or timestamp.
+If checks are pending or no check names are reported yet, end your final visible response with \`External check running | <concrete check names, or external PR checks pending when names are unavailable> | <full canonical PR URL> | since <the command's Europe/Berlin time> | worker finished and healthy\`.
 This label is presentation only: do not poll, do not append \`$PAUSED_VERB:\`, and do not wait for checks before appending \`done: PR {url}\` to the status file and stopping.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF

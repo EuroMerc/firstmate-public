@@ -159,7 +159,7 @@ EOF
     "kind=ship" \
     "mode=no-mistakes"
   record_claude_state "$home/state" external-wait idle
-  printf 'paused: declared external-wait for upstream release\n' > "$home/state/external-wait.status"
+  printf 'paused: External check running | Release verification | https://github.com/kunchenguid/firstmate/pull/123 | since 2026-08-28 12:00 CEST | worker finished and healthy\n' > "$home/state/external-wait.status"
   # The secondmate's OWN home backlog records a merge it managed. This lands in the
   # secondmate home, never the main backlog, so landed-work views only see it via the
   # bounded cross-home Done roll-up.
@@ -878,6 +878,23 @@ EOF
       and (.in_flight | any(.doing == "Phase 7 started") | not)
   ' >/dev/null || fail "prior status report influenced the standalone snapshot: $two"
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
+}
+
+test_external_wait_detail_stays_complete_without_unbounding_other_rows() {
+  local home fakebin json wait_detail long_working
+  home=$(make_home external-wait-detail); write_fixture "$home"
+  long_working='ordinary working detail that is deliberately much longer than ninety characters because bearings should still bound unrelated task prose rather than globally removing its cap'
+  printf 'working: %s\n' "$long_working" > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  wait_detail='External check running | Release verification | https://github.com/kunchenguid/firstmate/pull/123 | since 2026-08-28 12:00 CEST | worker finished and healthy'
+  printf '%s' "$json" | jq -e --arg wait "$wait_detail" '
+    (.in_flight[] | select(.id == "external-wait") | .doing) == $wait
+      and ((.in_flight[] | select(.id == "ship-task") | .doing) | endswith("…"))
+      and ((.in_flight[] | select(.id == "ship-task") | .doing) | length == 91)
+  ' >/dev/null || fail "bearings truncated the external wait or unbounded unrelated detail: $json"
+  pass "bearings preserves the complete external-wait reason, PR URL, and healthy label without unbounding other rows"
 }
 
 test_default_is_bounded_and_local_only() {
@@ -1953,6 +1970,7 @@ test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
+test_external_wait_detail_stays_complete_without_unbounding_other_rows
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges

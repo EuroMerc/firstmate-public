@@ -21,7 +21,7 @@ Exact verification commands:
 ```sh
 PATH="$HOME/.local/bin:$PATH" bin/fm-lint.sh
 bin/fm-test-run.sh tests/fm-brief.test.sh tests/fm-crew-state.test.sh tests/fm-fleet-snapshot-view.test.sh
-bin/fm-test-run.sh tests/fm-pr-check-security.test.sh
+bin/fm-test-run.sh tests/fm-bearings-snapshot.test.sh tests/fm-pr-check-security.test.sh
 bin/fm-doc-audience-check.sh
 ```
 
@@ -34,12 +34,14 @@ ok - fm-brief.sh: faster paths use configured authority without stacked review
 ok - no run + idle pane on a paused: status reports the visible external wait with its reason
 ok - worker-declared external wait renders Europe/Berlin daylight-saving time
 ok - fleet snapshot and human view retain the current external-wait detail
-ok - validated PR checks present named/unknown waits once, then green or failure through existing delivery paths
+ok - bearings preserves the complete external-wait reason, PR URL, and healthy label without unbounding other rows
+ok - validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths
 fm-doc-audience-check: ok surfaces=74 local_links=283
 ```
 
-The PR behavior regression covers a named pending check, a pending state without names, unchanged-wait deduplication, green continuation, named failure escalation, unreadable status escalation, and the full canonical URL without retaining raw forge output.
-The brief regression separately pins that opening the PR remains direct-PR completion, that the worker performs one non-watching read only, and that its final visible output labels a pending external check without appending a worker pause.
+The PR behavior regression covers a named pending check, a pending state without names, unchanged-wait deduplication, pending-only registration, green continuation, merge clearing, truthful closure, named failure escalation, unreadable status escalation, unknown GitLab state handling, and the full canonical URL without retaining raw forge output.
+The bearings regression preserves that full wait while proving unrelated task detail remains capped.
+The brief regression separately pins that opening the PR remains direct-PR completion, that the worker performs one non-watching read only, that its timestamp comes from the Europe/Berlin zone command rather than model inference, and that its final visible output labels a pending external check without appending a worker pause.
 The DST regression sets the canonical status mtime to 2026-03-29 01:30 UTC and observes `2026-03-29 03:30 CEST`, proving Europe/Berlin zone rules rather than a fixed offset.
 
 ## tmux

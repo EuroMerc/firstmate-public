@@ -109,7 +109,10 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+printf 'title:\tfixture merge request\n'
+[ "${FM_TEST_GLAB_OMIT_STATE:-0}" = 1 ] || printf 'state:\t%s\n' "${FM_TEST_GLAB_STATE:-opened}"
+[ -z "${FM_TEST_GLAB_PIPELINE:-}" ] || printf 'pipeline:\t%s\n' "$FM_TEST_GLAB_PIPELINE"
+printf 'author:\tsomeone\n'
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
   : > "$dir/gh.log"
@@ -709,6 +712,20 @@ test_external_check_visible_transitions() {
   assert_contains "$(cat "$dir/green.out")" "signal:" \
     "green checks did not surface through the existing actionable status path"
 
+  dir=$(make_case external-check-arm-terminal)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'failed\ttransient red sample' \
+    run_check_entry "$dir" task-a "$url" > "$dir/red-arm.out" 2> "$dir/red-arm.err" \
+    || fail "red first observation prevented PR registration"
+  [ ! -e "$state/task-a.status" ] \
+    || fail "red first observation published a durable registration-time failure"
+  FM_TEST_GH_FAIL=1 run_check_entry "$dir" task-a "$url" \
+    > "$dir/unreadable-arm.out" 2> "$dir/unreadable-arm.err" \
+    || fail "unreadable first observation prevented PR registration"
+  [ ! -e "$state/task-a.status" ] \
+    || fail "unreadable first observation published a durable registration-time failure"
+
   dir=$(make_case external-check-unknown)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -719,6 +736,23 @@ test_external_check_visible_transitions() {
   assert_not_contains "$(cat "$dir/arm.out")" "External check running |  |" \
     "unknown-name pending checks rendered an empty invented name"
 
+  dir=$(make_case external-check-pause-vocabulary)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_CLASSIFY_PAUSED_VERB=waiting FM_TEST_GH_OBSERVATION=pending \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "configured pause-vocabulary registration failed"
+  grep -qF "waiting: External PR checks pending | $url |" "$state/task-a.status" \
+    || fail "PR wait did not use the existing configured pause-verb owner"
+  assert_no_grep '^paused:' "$state/task-a.status" \
+    "PR wait hardcoded the default pause verb"
+
+  dir=$(make_case external-check-failure)
+  state="$dir/home/state"
+  # Use a normal pending fixture for the repeated-monitor failure transition.
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "failure transition fixture did not arm"
   FM_TEST_GH_OBSERVATION=$'failed\tMigrationen + Testsuite' \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/failed.out" 2> "$dir/failed.err" \
     || fail "failed-check watcher transition failed"
@@ -740,7 +774,29 @@ test_external_check_visible_transitions() {
   [ "$rc" -eq 0 ] || fail "unreadable-check watcher transition failed: $(cat "$dir/unreadable.err")"
   grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
     || fail "unreadable terminal check did not become an actionable failure"
-  pass "validated PR checks present named/unknown waits once, then green or failure through existing delivery paths"
+
+  dir=$(make_case external-check-merged)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tRelease verification' \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "merged wait fixture did not arm"
+  FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/merged.out" 2> "$dir/merged.err" || fail "merged wait watcher failed"
+  grep -qxF "done: PR $url merged" "$state/task-a.status" \
+    || fail "merge did not clear the published external wait through status"
+  assert_poll_absent "$state" task-a
+
+  dir=$(make_case external-check-closed)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "closed wait fixture did not arm"
+  FM_TEST_GH_OBSERVATION=closed run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/closed.out" 2> "$dir/closed.err" || fail "closed wait watcher failed"
+  grep -qxF "failed: PR $url closed before merge" "$state/task-a.status" \
+    || fail "closed PR was mislabeled as an external check failure"
+  pass "validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -2909,6 +2965,21 @@ group/subgroup/project
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
+
+  # The richer observer distinguishes only exact terminal states. Unknown or
+  # absent state fields remain unreadable rather than becoming false closures.
+  out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = closed ] || fail "GitLab observer did not classify exact closed state truthfully"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = unreadable ] || fail "GitLab observer turned an unknown state into a terminal closure"
+  out=$(FM_TEST_GLAB_OMIT_STATE=1 FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = unreadable ] || fail "GitLab observer turned an absent state into a terminal closure"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git

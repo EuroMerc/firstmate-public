@@ -313,6 +313,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def in_flight_detail:
+    tostring | gsub("\\s+"; " ")
+    | if startswith("External check running | ")
+         or startswith("External PR checks pending | ")
+         or startswith("External wait | ")
+      then . else trunc(90) end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -386,7 +392,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | in_flight_detail)
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")

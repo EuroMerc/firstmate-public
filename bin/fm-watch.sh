@@ -1232,7 +1232,7 @@ while :; do
       fi
       if [ "$is_pr_poll" -eq 1 ]; then
         case "$out" in
-          pending|pending$'\t'*|green|failed|failed$'\t'*|unreadable)
+          pending|pending$'\t'*|green|closed|failed|failed$'\t'*|unreadable)
             if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
               "$STATE/$id.pr-poll-registration" "$out"; then
               reason="check: PR external-wait presentation failed for $id"
@@ -1242,6 +1242,17 @@ while :; do
             fi
             touch "$STATE/.last-check"
             continue
+            ;;
+          merged)
+            # Clear a currently published wait before the existing merge wake
+            # and poll-retirement path removes its canonical registration.
+            if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" merged; then
+              reason="check: PR external-wait presentation failed for $id"
+              fm_wake_append check "$c" "$reason" || exit 1
+              touch "$STATE/.last-check"
+              wake "$reason"
+            fi
             ;;
         esac
       fi

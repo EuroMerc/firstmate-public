@@ -139,14 +139,16 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 
-# One immediate, non-watching observation makes an already-pending external
-# check visible as soon as registration completes. The watcher runs the same
-# static observer on its existing cadence; the shared publisher appends only a
-# changed transition, so an unchanged wait stays silent.
+# One immediate, non-watching observation makes only an already-pending
+# external check visible as soon as registration completes. A red or unreadable
+# first sample is left to the existing repeated watcher path, so a transient
+# forge condition cannot turn PR-open readiness into a durable failure. The
+# watcher runs the same static observer on its existing cadence; the shared
+# publisher appends only a changed transition, so an unchanged wait stays silent.
 OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
   "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER")
 case "$OBSERVATION" in
-  pending|pending$'\t'*|failed|failed$'\t'*|unreadable)
+  pending|pending$'\t'*)
     fm_external_wait_publish_pr "$STATE" "$ID" "$URL" \
       "$STATE/$ID.pr-poll-registration" "$OBSERVATION" || {
         echo "error: could not publish PR external-wait presentation" >&2

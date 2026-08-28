@@ -3,7 +3,7 @@
 # Its legacy --validated and sidecar forms emit exactly one `merged` line for a
 # merged PR or MR and stay silent otherwise, including on every error.
 # The watcher uses --observe-validated with the same validated identity to emit
-# one structural observation: merged, green, unreadable, or pending/failed plus
+# one structural observation: merged, closed, green, unreadable, or pending/failed plus
 # sanitized concrete check names after one tab when the forge supplies them.
 # It never waits or loops; bin/fm-watch.sh owns cadence and the shared external-
 # wait presentation owner deduplicates unchanged observations.
@@ -95,14 +95,14 @@ case "$provider" in
            | gsub("^[ ]+|[ ]+$"; "") | .[:120] | select(length > 0)][0:5]
           | join(", ");
       if $pr == "MERGED" then "merged"
-      elif $pr == "CLOSED" then "failed\tpull request closed before merge"
+      elif $pr == "CLOSED" then "closed"
       elif any($checks[]; .failed) then "failed\t" + names("failed")
       elif any($checks[]; .pending) then "pending\t" + names("pending")
       else "green" end
     ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
     case "$observation" in
       '') ;;
-      merged|green|unreadable|pending|pending$'\t'*|failed|failed$'\t'*) printf '%s\n' "$observation" ;;
+      merged|closed|green|unreadable|pending|pending$'\t'*|failed|failed$'\t'*) printf '%s\n' "$observation" ;;
       *) printf '%s\n' unreadable ;;
     esac
     ;;
@@ -152,7 +152,11 @@ case "$provider" in
       exit 0
     fi
     [ "$observe" -eq 1 ] || exit 0
-    [ "$state" = opened ] || { printf 'failed\tmerge request closed before merge\n'; exit 0; }
+    case "$state" in
+      opened) ;;
+      closed) printf '%s\n' closed; exit 0 ;;
+      *) printf '%s\n' unreadable; exit 0 ;;
+    esac
     pipeline=$(printf '%s\n' "$raw" | sed -n 's/^pipeline:[[:space:]]*//p' | head -1)
     case "$pipeline" in
       success|passed) printf '%s\n' green ;;
