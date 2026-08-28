@@ -997,6 +997,33 @@ test_worker_pause_uses_berlin_dst() {
   pass "worker-declared external wait renders Europe/Berlin daylight-saving time"
 }
 
+# A worker authors its own pause reason, so the free part of the visible wait is
+# bounded while the required since-time and health fields stay complete.
+test_worker_pause_bounds_free_reason() {
+  reset_fakes
+  local d out reason detail
+  d=$(new_case paused-verbose)
+  make_repo_on_branch "$d/wt" fm/feat-pause-verbose
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-verbose.meta" "window=fm:fm-feat-pause-verbose" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  reason=$(awk 'BEGIN{s="";while(length(s)<900)s=s "upstream release blocked because ";print s}')
+  printf 'paused: %s\n' "$reason" > "$d/state/feat-pause-verbose.status"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 "$d/state/feat-pause-verbose.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-verbose
+  out=$(run_crew_state "$d" feat-pause-verbose)
+  detail="External wait | ${out#*External wait | }"
+  assert_contains "$detail" "External wait | upstream release blocked because " \
+    "the bounded wait lost its worker-declared reason"
+  assert_contains "$detail" "| since 2026-03-29 03:30 CEST | worker healthy" \
+    "bounding the free reason truncated the required since-time or health fields"
+  [ "${#detail}" -le 320 ] \
+    || fail "a verbose worker reason was presented unbounded (${#detail} characters)"
+  pass "a verbose worker-declared reason is bounded while required wait fields stay complete"
+}
+
 test_no_run_idle_pane_custom_paused_verb() {
   reset_fakes
   local d; d=$(new_case custom-paused)
@@ -1463,6 +1490,7 @@ test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_worker_pause_uses_berlin_dst
+test_worker_pause_bounds_free_reason
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log

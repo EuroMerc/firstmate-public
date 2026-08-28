@@ -85,8 +85,10 @@ case "$provider" in
       .state as $pr
       | [(.statusCheckRollup // [])[]
           | if .__typename == "CheckRun" then
-              {name:(.name // ""), pending:(.status != "COMPLETED"),
-               failed:(.status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE")))}
+              {name:(.name // ""),
+               pending:(.status != "COMPLETED"
+                        or ((.conclusion // "") == "ACTION_REQUIRED")),
+               failed:(.status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","STARTUP_FAILURE","STALE")))}
             elif .__typename == "StatusContext" then
               {name:(.context // ""), pending:(.state == "PENDING" or .state == "EXPECTED"),
                failed:((.state // "") | IN("ERROR","FAILURE"))}
@@ -94,8 +96,8 @@ case "$provider" in
         ] as $checks
       | def names($which):
           [$checks[] | select(.[$which]) | .name
-           | gsub("[\\u0000-\\u001f\\u007f|]"; " ")
-           | gsub("^[ ]+|[ ]+$"; "") | .[:120] | select(length > 0)][0:5]
+           | (explode | map(if . < 32 or . == 127 or . == 124 then 32 else . end) | implode)
+           | gsub("^ +| +$"; "") | .[:120] | select(length > 0)][0:5]
           | join(", ");
       if $pr == "MERGED" then "merged"
       elif $pr == "CLOSED" then "closed"
@@ -188,7 +190,7 @@ FIELDS
     case "$pipeline" in
       success|passed) printf '%s\n' green ;;
       failed|canceled|cancelled) printf 'failed\t%s\n' "pipeline $pipeline" ;;
-      created|preparing|pending|running|waiting_for_resource|scheduled|manual) printf 'pending\t%s\n' "pipeline $pipeline" ;;
+      created|preparing|pending|running|waiting_for_resource|scheduled|manual|canceling|cancelling) printf 'pending\t%s\n' "pipeline $pipeline" ;;
       ''|skipped) printf '%s\n' none ;;
       *) printf '%s\n' unreadable ;;
     esac

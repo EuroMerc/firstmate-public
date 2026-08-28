@@ -10,7 +10,11 @@
 # active CET/CEST daylight-saving abbreviation.
 #
 # fm_external_wait_worker_detail <reason> <status-log>
-#   Print the persistent current-state detail for a worker-declared wait.
+#   Print the persistent current-state detail for a worker-declared wait. The
+#   free worker-authored reason is bounded to
+#   FM_EXTERNAL_WAIT_WORKER_REASON_MAX (default 240) characters so one verbose
+#   worker cannot dominate a fleet or Bearings projection, while the since-time
+#   and health fields stay complete.
 #
 # fm_external_wait_publish_pr <state-dir> <task-id> <pr-url>
 #                             <registration-file> <observation>
@@ -40,6 +44,7 @@ fi
 FM_EXTERNAL_WAIT_CHANGED=0
 FM_EXTERNAL_WAIT_DISPLAY=
 FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS_DEFAULT=120
+FM_EXTERNAL_WAIT_WORKER_REASON_MAX_DEFAULT=240
 
 fm_external_wait_file_mtime() {  # <file>
   if [ "$(uname)" = Darwin ]; then
@@ -61,20 +66,23 @@ fm_external_wait_berlin_time() {  # <epoch>
 
 fm_external_wait_clean_names() {  # <forge-supplied names>
   local clean
-  clean=$(printf '%s' "$1" | tr '\t\r\n|' '    ' | tr -s ' ')
+  clean=$(printf '%s' "$1" | tr '\t\r\n|' '    ' | tr -d '[:cntrl:]' | tr -s ' ')
   clean=${clean#"${clean%%[![:space:]]*}"}
   clean=${clean%"${clean##*[![:space:]]}"}
   printf '%.600s' "$clean"
 }
 
 fm_external_wait_worker_detail() {  # <reason> <status-log>
-  local reason=$1 status_log=$2 epoch since
+  local reason=$1 status_log=$2 epoch since max
   case "$reason" in
     'External check running | '*|'External PR checks pending | '*)
       printf '%s' "$reason"
       return 0
       ;;
   esac
+  max=${FM_EXTERNAL_WAIT_WORKER_REASON_MAX:-$FM_EXTERNAL_WAIT_WORKER_REASON_MAX_DEFAULT}
+  case "$max" in ''|*[!0-9]*) max=$FM_EXTERNAL_WAIT_WORKER_REASON_MAX_DEFAULT ;; esac
+  if [ "${#reason}" -gt "$max" ]; then reason="${reason:0:$max}…"; fi
   epoch=$(fm_external_wait_file_mtime "$status_log") || return 1
   since=$(fm_external_wait_berlin_time "$epoch") || return 1
   printf 'External wait | %s | since %s | worker healthy' "$reason" "$since"

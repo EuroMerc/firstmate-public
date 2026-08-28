@@ -83,6 +83,20 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" state,statusCheckRollup "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    if [ -n "${FM_TEST_GH_ROLLUP:-}" ]; then
+      # Reproduce the real CLI for this form: gh applies the caller's own -q
+      # program to the requested JSON object, so the observer's classification
+      # runs against forge-shaped payload bytes through the real jq.
+      prev=
+      program=
+      for arg in "$@"; do
+        [ "$prev" = -q ] && program=$arg
+        prev=$arg
+      done
+      [ -n "$program" ] || exit 1
+      printf '%s' "$FM_TEST_GH_ROLLUP" | "${FM_TEST_JQ:-jq}" -r "$program" || exit 1
+      exit 0
+    fi
     if [ -n "${FM_TEST_GH_OBSERVATION:-}" ]; then
       printf '%s\n' "$FM_TEST_GH_OBSERVATION"
     elif [ "${FM_TEST_GH_STATE:-OPEN}" = MERGED ]; then
@@ -881,6 +895,102 @@ test_external_check_visible_transitions() {
   grep -qxF "failed: PR $url closed before merge" "$state/task-a.status" \
     || fail "closed PR was mislabeled as an external check failure"
   pass "validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths"
+}
+
+# The GitHub observer is exercised against forge-shaped statusCheckRollup
+# payloads through the real jq the CLI applies, so its classification, name
+# sanitization and name bound are behavior rather than unread source bytes.
+test_github_rollup_classification() {
+  local dir url out
+  dir=$(make_case github-rollup-classification)
+  url=https://github.com/o/r/pull/52
+
+  observe_rollup() {  # <rollup-json>
+    FM_TEST_GH_ROLLUP="$1" FM_TEST_JQ="$REAL_JQ" \
+      FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+      PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+        github "$url" github.com o/r 52
+  }
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[]}')
+  [ "$out" = empty ] || fail "an empty GitHub rollup was not reported as empty, got: $out"
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+    {"__typename":"StatusContext","context":"legacy","state":"SUCCESS"}]}')
+  [ "$out" = green ] || fail "an all-passed GitHub rollup was not green, got: $out"
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"build (ubuntu, node 20)","status":"IN_PROGRESS","conclusion":null}]}')
+  [ "$out" = $'pending\tbuild (ubuntu, node 20)' ] \
+    || fail "a running GitHub check run was not pending with its concrete name, got: $out"
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"StatusContext","context":"ci/legacy","state":"PENDING"}]}')
+  [ "$out" = $'pending\tci/legacy' ] \
+    || fail "a pending GitHub status context was not pending with its context, got: $out"
+
+  # A workflow held at an approval gate is waiting, not red.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"deploy approval","status":"COMPLETED","conclusion":"ACTION_REQUIRED"}]}')
+  [ "$out" = $'pending\tdeploy approval' ] \
+    || fail "an approval-gated GitHub check was escalated instead of pending, got: $out"
+
+  # A stale check produced no result for the current ref and stays actionable.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"stale unit","status":"COMPLETED","conclusion":"STALE"}]}')
+  [ "$out" = $'failed\tstale unit' ] \
+    || fail "a stale GitHub check was not reported truthfully as failed, got: $out"
+
+  # Red wins over still-running work, and only the red names are reported.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"still running","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
+    {"__typename":"StatusContext","context":"legacy","state":"ERROR"}]}')
+  [ "$out" = $'failed\tunit, legacy' ] \
+    || fail "GitHub red checks did not take precedence with only their own names, got: $out"
+
+  # Forge-supplied names cannot inject separators or terminal escapes.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"a|b\u001b[31mc","status":"IN_PROGRESS","conclusion":null}]}')
+  case "$out" in
+    *'|'*) fail "a GitHub check name injected the field separator: $out" ;;
+    *$'\033'*) fail "a GitHub check name injected a terminal escape: $out" ;;
+    'pending	'*) ;;
+    *) fail "a hostile GitHub check name did not classify as pending, got: $out" ;;
+  esac
+
+  # Many pending checks are bounded to a readable label.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"c1","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c2","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c3","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c4","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c5","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c6","status":"QUEUED","conclusion":null}]}')
+  [ "$out" = $'pending\tc1, c2, c3, c4, c5' ] \
+    || fail "pending GitHub check names were not bounded to the first five, got: $out"
+
+  out=$(observe_rollup '{"state":"MERGED","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"IN_PROGRESS","conclusion":null}]}')
+  [ "$out" = merged ] || fail "a merged GitHub PR was not terminal, got: $out"
+  out=$(observe_rollup '{"state":"CLOSED","statusCheckRollup":[]}')
+  [ "$out" = closed ] || fail "a closed GitHub PR was not terminal, got: $out"
+
+  # The same payload reaches durable state as a bounded captain-facing wait
+  # with no raw forge fields.
+  write_task_meta "$dir"
+  FM_TEST_JQ="$REAL_JQ" \
+    FM_TEST_GH_ROLLUP='{"state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","name":"build (ubuntu, node 20)","status":"IN_PROGRESS","conclusion":null}]}' \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "registration against a real GitHub rollup failed: $(cat "$dir/arm.err")"
+  grep -qF "paused: External check running | build (ubuntu, node 20) | $url | since " \
+    "$dir/home/state/task-a.status" \
+    || fail "the observed rollup did not become the durable external wait"
+  assert_no_grep '__typename' "$dir/home/state/task-a.status" \
+    "raw forge payload fields reached durable fleet state"
+  pass "GitHub rollup payloads classify, bound and sanitize their observation through the real CLI parser"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -3086,6 +3196,26 @@ group/subgroup/project
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
   [ "$out" = green ] || fail "GitLab observer did not recognize a successful structured pipeline"
+  # A known non-terminal pipeline status that was read successfully is still
+  # resolving; only a genuinely unknown value may be unreadable.
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=canceling \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = $'pending\tpipeline canceling' ] \
+    || fail "GitLab observer turned a readable canceling pipeline into an unreadable status, got: $out"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = $'failed\tpipeline failed' ] \
+    || fail "GitLab observer did not report a failed pipeline as actionable, got: $out"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=not-a-pipeline-status \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = unreadable ] \
+    || fail "GitLab observer classified an unknown pipeline status instead of reporting it unreadable, got: $out"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git
@@ -3757,6 +3887,7 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_external_check_visible_transitions
+test_github_rollup_classification
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
