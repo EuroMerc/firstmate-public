@@ -754,7 +754,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),
-              external_wait_detail:((.current_state.detail // null) | external_wait_detail),source:"child-state"} ]) as $holds_all
+              external_wait_detail:(
+                if .current_state.state == "paused" and .current_state.source == "status-log"
+                then ((.current_state.detail // null) | external_wait_detail)
+                else null end),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
        and ($unknown_children | length) == 0

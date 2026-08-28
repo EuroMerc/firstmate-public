@@ -161,10 +161,10 @@ fm_pr_poll_publish_prepared || {
 # no observation. Presentation is best-effort after atomic poll publication: a
 # failure is reported but cannot turn successful arming into a false failure.
 if [ "$OBSERVE_PENDING" -eq 1 ]; then
-  OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
+  OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-phase-validated \
     "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER")
   case "$OBSERVATION" in
-    pending|pending$'\t'*|empty)
+    pending|pending$'\t'*|empty|empty$'\t'*)
       if ! fm_external_wait_publish_pr "$STATE" "$ID" "$URL" \
         "$STATE/$ID.pr-poll-registration" "$OBSERVATION"; then
         echo "warning: PR poll armed but external-wait presentation could not be published" >&2

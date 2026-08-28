@@ -1217,7 +1217,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --observe-phase-validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
@@ -1233,7 +1233,8 @@ while :; do
       fi
       if [ "$is_pr_poll" -eq 1 ]; then
         case "$out" in
-          pending|pending$'\t'*|empty|none|no-pipeline|green|failed|failed$'\t'*|unreadable)
+          pending|pending$'\t'*|empty|empty$'\t'*|none|none$'\t'*|no-pipeline|no-pipeline$'\t'*|\
+          green|green$'\t'*|failed|failed$'\t'*|unreadable|unreadable$'\t'*)
             if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
               "$STATE/$id.pr-poll-registration" "$out"; then
               reason="check: PR external-wait presentation failed for $id"
@@ -1244,7 +1245,7 @@ while :; do
             touch "$STATE/.last-check"
             continue
             ;;
-          closed)
+          closed|closed$'\t'*)
             # Presentation is a best-effort layer over an already-published
             # poll, so a failure here never preempts closure or retirement.
             if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
@@ -1257,18 +1258,19 @@ while :; do
             touch "$STATE/.last-check"
             continue
             ;;
-          merged)
+          merged|merged$'\t'*)
             # Clear a currently published wait before the existing merge wake
             # and poll-retirement path removes its canonical registration.
             fm_external_wait_publish_pr "$STATE" "$id" "$url" \
-              "$STATE/$id.pr-poll-registration" merged \
+              "$STATE/$id.pr-poll-registration" "$out" \
               || triage_log "PR external-wait presentation failed for $id: merged"
+            out=merged
             ;;
         esac
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ] \
+        if [ "$is_pr_poll" -eq 1 ] && [ "${out%%$'\t'*}" = merged ] \
           && fm_pr_poll_merge_already_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number"; then
           # This exact merge was already surfaced to main once for this task
@@ -1284,7 +1286,7 @@ while :; do
           continue
         fi
         fm_wake_append check "$c" "$reason" || exit 1
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+        if [ "$is_pr_poll" -eq 1 ] && [ "${out%%$'\t'*}" = merged ]; then
           fm_pr_poll_merge_mark_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number" \
             || triage_log "merge notification receipt could not be recorded for $id"

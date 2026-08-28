@@ -920,6 +920,19 @@ EOF
   printf 'working: %s\n' "$long_working" > "$home/state/ship-task.status"
   record_claude_state "$home/state" ship-task idle
 
+  # A secondmate child gets the typed field only from a reconciled paused
+  # status-log wait; blocked prose imitating the complete label stays bounded.
+  printf 'blocked: %s copied worker prose that must not become typed\n' "$secondmate_wait" > "$mate/state/mate.status"
+  record_claude_state "$mate/state" mate idle
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | endswith("…")) and (($doing | length) == 121)
+      and (($doing | contains("worker finished and healthy copied")) | not)
+  ' >/dev/null || fail "a non-paused secondmate row gained typed external-wait provenance: $json"
+  printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate.status"
+  record_claude_state "$mate/state" mate idle
+
   long_hold='ordinary secondmate hold reason that is intentionally far longer than the existing one hundred and twenty character cap so this unrelated prose must remain bounded even though typed external waits are preserved in full'
   cat > "$mate/data/backlog.md" <<EOF
 ## In flight

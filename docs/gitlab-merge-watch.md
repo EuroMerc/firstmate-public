@@ -53,7 +53,8 @@ Two things about plain `glab` were established by running it, because assuming e
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 The legacy merged-only check therefore retains the field-output path below: only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
-The richer external-wait observer uses the same command with `-F json` and the bootstrap-required `jq` to select only merge-request state and head-pipeline status in memory; raw JSON is never persisted or copied into fleet state.
+The richer external-wait observer uses the same command with `-F json` and the bootstrap-required `jq` to select only merge-request state, canonical head SHA, and head-pipeline status in memory; raw JSON is never persisted or copied into fleet state.
+The validated head binds the existing registration's observation phase: same-head re-arms and unreadable gaps preserve its start, the first known head binds an unknown phase without a reset, and only a proven different head starts a new phase.
 Arming a GitLab watch now refuses when either `glab` or `jq` is absent, rather than publishing a watcher that cannot make its structured observation.
 A skipped or absent head pipeline is reported as an actionable not-merge-ready observation rather than delivery readiness, because the merge path below refuses exactly that merge request; the watch keeps observing it, since a pipeline can still appear.
 
@@ -118,7 +119,7 @@ group/subgroup/project
 7
 ```
 
-The provenance record for the non-default host, showing the bumped version tag:
+The historical provenance record for the non-default host, showing the provider-tagged v2 version then under test:
 
 ```
 $ cat state/e3.pr-poll-registration
@@ -200,7 +201,10 @@ task t1: migration outcome tracking started before legacy poll handling
 task t1: canonical legacy poll rebuilt and armed
 ```
 
-The rebuilt poll works, verified against a pull request that is genuinely merged:
+Current registrations are `fm-pr-poll-registration-v3`: v3 appends the validated phase head, publisher kind, transition epoch, and observation fingerprint to the same identity-bound record.
+The same non-executing migration rebuilds v1 and v2 polls as v3; a silent same-PR re-arm preserves those phase fields until a structured observation proves a different forge head.
+
+The rebuilt historical poll works, verified against a pull request that is genuinely merged:
 
 ```
 $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll)

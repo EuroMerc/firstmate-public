@@ -2,8 +2,10 @@
 # Static watcher program for a validated PR/MR poll sidecar.
 # Its legacy --validated and sidecar forms emit exactly one `merged` line for a
 # merged PR or MR and stay silent otherwise, including on every error.
-# The watcher uses --observe-validated with the same validated identity to emit
-# one structural observation: merged, closed, green, empty, no-pipeline,
+# The watcher uses --observe-phase-validated with the same validated identity
+# to emit kind<TAB>validated-head-or--<TAB>optional-names. The diagnostic
+# --observe-validated form emits the same classification without the phase head.
+# Both forms emit one structural observation: merged, closed, green, empty, no-pipeline,
 # unreadable, or pending/failed plus sanitized concrete check names after one
 # tab when the forge supplies them. `empty` is a GitHub rollup whose startup
 # grace is decided from the existing registration timestamp by
@@ -23,8 +25,12 @@ LC_ALL=C
 export LC_ALL
 
 observe=0
-if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --observe-validated ]; }; then
-  [ "$1" = --observe-validated ] && observe=1
+phase=0
+if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --observe-validated ] || [ "$1" = --observe-phase-validated ]; }; then
+  case "$1" in
+    --observe-validated) observe=1 ;;
+    --observe-phase-validated) observe=1; phase=1 ;;
+  esac
   provider=$2
   url=$3
   host=$4
@@ -59,6 +65,29 @@ case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
 
+emit_observation() {  # <phase-shaped observation>
+  local raw=$1 kind rest names
+  if [ "$phase" -eq 0 ]; then
+    case "$raw" in
+      *$'\t'*$'\t'*)
+        kind=${raw%%$'\t'*}
+        rest=${raw#*$'\t'}
+        names=${rest#*$'\t'}
+        case "$kind" in
+          pending|failed) [ -z "$names" ] || { printf '%s\t%s\n' "$kind" "$names"; return 0; } ;;
+        esac
+        printf '%s\n' "$kind"
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s\n' "$raw"
+}
+
+emit_structured_observation() {  # <kind> <validated-head|-> [names]
+  emit_observation "$1"$'\t'"$2"$'\t'"${3:-}"
+}
+
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot redirect this poll at another host or project.
@@ -85,8 +114,10 @@ case "$provider" in
     # never enters fleet state. Names are control-stripped, pipe-neutralized,
     # bounded, and limited before they cross the process boundary.
     # shellcheck disable=SC2016 # The single-quoted program is gh's jq expression.
-    observation=$(gh pr view "$url" --json state,statusCheckRollup -q '
+    observation=$(gh pr view "$url" --json state,headRefOid,statusCheckRollup -q '
       .state as $pr
+      | ((.headRefOid // "") | tostring
+         | if test("^([0-9a-f]{40}|[0-9a-f]{64})$") then . else "-" end) as $head
       | [(.statusCheckRollup // [])[]
           | if .__typename == "CheckRun" then
               {name:(.name // ""),
@@ -104,17 +135,19 @@ case "$provider" in
            | (explode | map(if . < 32 or . == 127 or . == 124 then 32 else . end) | implode)
            | gsub("^ +| +$"; "") | .[:120] | select(length > 0)][0:5]
           | join(", ");
-      if $pr == "MERGED" then "merged"
-      elif $pr == "CLOSED" then "closed"
-      elif any($checks[]; .failed) then "failed\t" + names("failed")
-      elif any($checks[]; .pending) then "pending\t" + names("pending")
-      elif any($checks[]; .unknown) then "unreadable"
-      elif ($checks | length) == 0 then "empty"
-      else "green" end
+      (if $pr == "MERGED" then {kind:"merged",names:""}
+       elif $pr == "CLOSED" then {kind:"closed",names:""}
+       elif any($checks[]; .failed) then {kind:"failed",names:names("failed")}
+       elif any($checks[]; .pending) then {kind:"pending",names:names("pending")}
+       elif any($checks[]; .unknown) then {kind:"unreadable",names:""}
+       elif ($checks | length) == 0 then {kind:"empty",names:""}
+       else {kind:"green",names:""} end)
+      | .kind + "\t" + $head + "\t" + .names
     ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
     case "$observation" in
       '') ;;
-      merged|closed|green|empty|unreadable|pending|pending$'\t'*|failed|failed$'\t'*) printf '%s\n' "$observation" ;;
+      merged$'\t'*|closed$'\t'*|green$'\t'*|empty$'\t'*|unreadable$'\t'*|pending$'\t'*|failed$'\t'*|\
+      merged|closed|green|empty|unreadable|pending|failed) emit_observation "$observation" ;;
       *) printf '%s\n' unreadable ;;
     esac
     ;;
@@ -159,46 +192,53 @@ case "$provider" in
       exit 0
     fi
 
-    # The richer observation reads state and head-pipeline status from glab's
-    # existing structured merge-request response. jq emits only two bounded
-    # named scalars; raw forge JSON never reaches fleet state or disk.
+    # The richer observation reads state, canonical head, and head-pipeline
+    # status from glab's structured merge-request response. jq emits only three
+    # bounded named scalars; raw forge JSON never reaches fleet state or disk.
     json=$(GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) \
       || { printf '%s\n' unreadable; exit 0; }
     fields=$(printf '%s' "$json" | jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
-        "pipeline=" + ((.head_pipeline.status // "") | tostring)
+        "pipeline=" + ((.head_pipeline.status // "") | tostring),
+        "head=" + ((.sha // "") | tostring)
       else error("merge request payload is not an object") end
     ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
     total=0
     named=0
     state=
     pipeline=
+    head=-
     while IFS= read -r field; do
       total=$((total + 1))
       case "$field" in
         state=*) state=${field#state=} ;;
         pipeline=*) pipeline=${field#pipeline=} ;;
+        head=*) candidate_head=${field#head=} ;;
         *) continue ;;
       esac
       named=$((named + 1))
     done <<FIELDS
 $fields
 FIELDS
-    [ "$total" -eq 2 ] && [ "$named" -eq 2 ] \
+    [ "$total" -eq 3 ] && [ "$named" -eq 3 ] \
       || { printf '%s\n' unreadable; exit 0; }
+    if [[ "${candidate_head:-}" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
+      head=$candidate_head
+    fi
     case "$state" in
-      merged) printf '%s\n' merged; exit 0 ;;
-      closed) printf '%s\n' closed; exit 0 ;;
+      merged) emit_structured_observation merged "$head"; exit 0 ;;
+      closed) emit_structured_observation closed "$head"; exit 0 ;;
       open|opened) ;;
       *) printf '%s\n' unreadable; exit 0 ;;
     esac
     case "$pipeline" in
-      success|passed) printf '%s\n' green ;;
-      failed|canceled|cancelled) printf 'failed\t%s\n' "pipeline $pipeline" ;;
-      created|preparing|pending|running|waiting_for_resource|scheduled|manual|canceling|cancelling) printf 'pending\t%s\n' "pipeline $pipeline" ;;
-      ''|skipped) printf '%s\n' no-pipeline ;;
-      *) printf '%s\n' unreadable ;;
+      success|passed) emit_structured_observation green "$head" ;;
+      failed|canceled|cancelled) emit_structured_observation failed "$head" "pipeline $pipeline" ;;
+      created|preparing|pending|running|waiting_for_resource|scheduled|manual|canceling|cancelling)
+        emit_structured_observation pending "$head" "pipeline $pipeline" ;;
+      ''|skipped) emit_structured_observation no-pipeline "$head" "$pipeline" ;;
+      *) emit_structured_observation unreadable "$head" ;;
     esac
     ;;
   *) exit 0 ;;
