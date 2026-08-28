@@ -64,7 +64,7 @@ A validated pending PR observation uses the same declared-wait event and present
 Registration publishes only a real pending sample or an empty GitHub rollup still inside the short registration-age startup grace; a still-empty rollup after that grace becomes a truthful no-checks result rather than green or a permanent wait.
 GitLab's richer observation reads merge-request state and head-pipeline status from the existing structured response: `open` and `opened` are tolerated, `manual` remains pending, and a skipped or absent pipeline means no running checks.
 Repeated monitoring owns red and unreadable escalation and keeps observing those recoverable outcomes; merge replaces any earlier publisher-owned wait or recoverable failure for the same URL, while definitive merge and closure retire the existing poll.
-The bearings projection preserves the complete bounded external-wait reason, canonical PR URL, timestamp, and healthy-worker label while retaining its ordinary detail cap for every unrelated row.
+The bearings projection preserves the complete bounded external-wait reason, canonical PR URL, timestamp, and healthy-worker label for both main-home tasks and the narrowly typed external-wait detail in a secondmate home summary, while retaining its ordinary detail caps for every unrelated row.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
@@ -262,7 +262,8 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Delivery modes are explicit per task
 
 `no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
-A direct-PR worker makes one non-watching check read for its final visible external-wait label and still reports completion immediately after opening the PR; the existing validated PR poll then owns silent unchanged observations, green continuation, failure escalation, and merge monitoring without another model turn or checker.
+A direct-PR worker makes one non-watching check read for its final visible external-wait label and still reports completion immediately after opening the PR; when firstmate first records that ready PR it explicitly opts the poll registration into one immediate pending observation, while every later re-arm (including the pre-merge metadata refresh) stays silent.
+The existing validated PR poll then owns silent unchanged observations, green continuation, failure escalation, and merge monitoring without another model turn or checker.
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.

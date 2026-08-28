@@ -5,7 +5,10 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# Usage: fm-pr-check.sh [--observe-pending] <task-id> <pr-url>
+#   --observe-pending performs the one immediate non-watching observation used
+#   only when firstmate first records a newly opened ready PR. Re-arms, including
+#   fm-pr-merge.sh's metadata refresh, omit it and publish no fresh wait.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +23,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-external-wait-lib.sh
 . "$SCRIPT_DIR/fm-external-wait-lib.sh"
 
+OBSERVE_PENDING=0
+if [ "${1:-}" = --observe-pending ]; then
+  OBSERVE_PENDING=1
+  shift
+fi
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -145,25 +153,25 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 
-# One immediate, non-watching observation makes only an already-pending check,
-# or a GitHub empty rollup still inside its registration-age startup grace,
-# visible as soon as registration completes. A red or unreadable
-# first sample is left to the existing repeated watcher path, so a transient
-# forge condition cannot turn PR-open readiness into a durable failure. The
-# watcher runs the same static observer on its existing cadence; the shared
-# publisher appends only a changed transition, so an unchanged wait stays silent.
-OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
-  "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER")
-case "$OBSERVATION" in
-  pending|pending$'\t'*|empty)
-    fm_external_wait_publish_pr "$STATE" "$ID" "$URL" \
-      "$STATE/$ID.pr-poll-registration" "$OBSERVATION" || {
-        echo "error: could not publish PR external-wait presentation" >&2
-        exit 1
-      }
-    if [ "$FM_EXTERNAL_WAIT_CHANGED" -eq 1 ]; then
-      printf '%s\n' "$FM_EXTERNAL_WAIT_DISPLAY"
-    fi
-    ;;
-esac
+# The explicit first-open option makes only an already-pending check, or a
+# GitHub empty rollup still inside its registration-age startup grace, visible
+# as soon as registration completes. A red or unreadable first sample is left
+# to the existing repeated watcher path, so a transient forge condition cannot
+# turn PR-open readiness into a durable failure. Re-arms omit the option and do
+# no observation. Presentation is best-effort after atomic poll publication: a
+# failure is reported but cannot turn successful arming into a false failure.
+if [ "$OBSERVE_PENDING" -eq 1 ]; then
+  OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
+    "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER")
+  case "$OBSERVATION" in
+    pending|pending$'\t'*|empty)
+      if ! fm_external_wait_publish_pr "$STATE" "$ID" "$URL" \
+        "$STATE/$ID.pr-poll-registration" "$OBSERVATION"; then
+        echo "warning: PR poll armed but external-wait presentation could not be published" >&2
+      elif [ "$FM_EXTERNAL_WAIT_CHANGED" -eq 1 ]; then
+        printf '%s\n' "$FM_EXTERNAL_WAIT_DISPLAY"
+      fi
+      ;;
+  esac
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

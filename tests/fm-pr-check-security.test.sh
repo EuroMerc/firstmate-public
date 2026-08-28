@@ -293,6 +293,12 @@ run_check_entry() {
     "$PR_CHECK" "$@"
 }
 
+run_check_observe_entry() {
+  local dir=$1
+  shift
+  run_check_entry "$dir" --observe-pending "$@"
+}
+
 run_merge_entry() {
   local dir=$1
   shift
@@ -710,7 +716,7 @@ test_external_check_visible_transitions() {
   state="$dir/home/state"
   write_task_meta "$dir"
   FM_TEST_GH_OBSERVATION=$'pending\tMigrationen + Testsuite, Browser smoke' \
-    run_check_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
     || fail "named pending PR registration failed"
   out=$(cat "$dir/arm.out")
   assert_contains "$out" "External check running | Migrationen + Testsuite, Browser smoke | $url | since " \
@@ -720,14 +726,16 @@ test_external_check_visible_transitions() {
   grep -F "paused: External check running | Migrationen + Testsuite, Browser smoke | $url | since " \
     "$state/task-a.status" >/dev/null || fail "named pending check was not durable current state"
 
-  # A repeated identical registration in the same presentation minute must not
-  # append another event. The registration mtime remains the canonical clock;
-  # display precision intentionally excludes seconds.
+  # Re-observe the same registration through the existing watcher cadence, so
+  # dedup uses one fixed canonical mtime and never depends on wall-clock minute.
+  add_stop_custom_check "$dir"
   FM_TEST_GH_OBSERVATION=$'pending\tMigrationen + Testsuite, Browser smoke' \
-    run_check_entry "$dir" task-a "$url" > "$dir/rearm.out" 2> "$dir/rearm.err" \
-    || fail "unchanged pending PR re-registration failed"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/repeat.out" 2> "$dir/repeat.err" \
+    || fail "unchanged pending watcher observation failed"
   count=$(grep -c '^paused: External check running |' "$state/task-a.status")
   [ "$count" -eq 1 ] || fail "unchanged pending check appended $count visible transitions"
+  ack_watcher_cycle "$state" || fail "dedup control wake acknowledgement failed"
+  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
 
   FM_TEST_GH_OBSERVATION=green run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/green.out" 2> "$dir/green.err" || fail "green continuation watcher failed"
@@ -740,20 +748,45 @@ test_external_check_visible_transitions() {
   state="$dir/home/state"
   write_task_meta "$dir"
   FM_TEST_GH_OBSERVATION=$'failed\ttransient red sample' \
-    run_check_entry "$dir" task-a "$url" > "$dir/red-arm.out" 2> "$dir/red-arm.err" \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/red-arm.out" 2> "$dir/red-arm.err" \
     || fail "red first observation prevented PR registration"
   [ ! -e "$state/task-a.status" ] \
     || fail "red first observation published a durable registration-time failure"
-  FM_TEST_GH_FAIL=1 run_check_entry "$dir" task-a "$url" \
+  FM_TEST_GH_FAIL=1 run_check_observe_entry "$dir" task-a "$url" \
     > "$dir/unreadable-arm.out" 2> "$dir/unreadable-arm.err" \
     || fail "unreadable first observation prevented PR registration"
   [ ! -e "$state/task-a.status" ] \
     || fail "unreadable first observation published a durable registration-time failure"
 
+  dir=$(make_case external-check-silent-rearm)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" \
+    > "$dir/initial.out" 2> "$dir/initial.err" || fail "initial observed registration failed"
+  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" \
+    > "$dir/rearm.out" 2> "$dir/rearm.err" || fail "silent PR re-arm failed"
+  assert_not_contains "$(cat "$dir/rearm.out")" "External PR checks pending" \
+    "silent re-arm published a fresh pending wait"
+  [ "$(grep -c '^paused: External PR checks pending |' "$state/task-a.status")" -eq 1 ] \
+    || fail "silent re-arm appended another pending event"
+
+  dir=$(make_case external-check-presentation-warning)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=invalid FM_TEST_GH_OBSERVATION=empty \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "optional presentation failure changed successful poll arming into failure"
+  grep -qxF 'armed: state/task-a.check.sh' "$dir/arm.out" \
+    || fail "presentation warning suppressed the successful armed result"
+  assert_contains "$(cat "$dir/arm.err")" "poll armed but external-wait presentation could not be published" \
+    "optional presentation failure was not reported"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "optional presentation failure damaged the armed poll"
+
   dir=$(make_case external-check-empty-startup)
   state="$dir/home/state"
   write_task_meta "$dir"
-  FM_TEST_GH_OBSERVATION=empty run_check_entry "$dir" task-a "$url" \
+  FM_TEST_GH_OBSERVATION=empty run_check_observe_entry "$dir" task-a "$url" \
     > "$dir/arm.out" 2> "$dir/arm.err" || fail "empty startup-rollup registration failed"
   grep -qF "paused: External PR checks pending | $url |" "$state/task-a.status" \
     || fail "empty startup rollup was declared green before checks could register"
@@ -769,7 +802,7 @@ test_external_check_visible_transitions() {
   dir=$(make_case external-check-unknown)
   state="$dir/home/state"
   write_task_meta "$dir"
-  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" \
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" \
     > "$dir/arm.out" 2> "$dir/arm.err" || fail "unknown-name pending registration failed"
   assert_contains "$(cat "$dir/arm.out")" "External PR checks pending | $url | since " \
     "unknown-name pending checks invented or omitted a label"
@@ -780,7 +813,7 @@ test_external_check_visible_transitions() {
   state="$dir/home/state"
   write_task_meta "$dir"
   FM_CLASSIFY_PAUSED_VERB=waiting FM_TEST_GH_OBSERVATION=pending \
-    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
     || fail "configured pause-vocabulary registration failed"
   grep -qF "waiting: External PR checks pending | $url |" "$state/task-a.status" \
     || fail "PR wait did not use the existing configured pause-verb owner"
@@ -791,7 +824,7 @@ test_external_check_visible_transitions() {
   state="$dir/home/state"
   # Use a normal pending fixture for the repeated-monitor failure transition.
   write_task_meta "$dir"
-  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
     || fail "failure transition fixture did not arm"
   FM_TEST_GH_OBSERVATION=$'failed\tMigrationen + Testsuite' \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/failed.out" 2> "$dir/failed.err" \
@@ -806,7 +839,7 @@ test_external_check_visible_transitions() {
   dir=$(make_case external-check-unreadable)
   state="$dir/home/state"
   write_task_meta "$dir"
-  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
     || fail "unreadable transition fixture did not arm"
   set +e
   FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -823,7 +856,7 @@ test_external_check_visible_transitions() {
   state="$dir/home/state"
   write_task_meta "$dir"
   FM_TEST_GH_OBSERVATION=$'pending\tRelease verification' \
-    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
     || fail "merged wait fixture did not arm"
   FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/transient.out" 2> "$dir/transient.err" \
@@ -841,7 +874,7 @@ test_external_check_visible_transitions() {
   dir=$(make_case external-check-closed)
   state="$dir/home/state"
   write_task_meta "$dir"
-  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
     || fail "closed wait fixture did not arm"
   FM_TEST_GH_OBSERVATION=closed run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/closed.out" 2> "$dir/closed.err" || fail "closed wait watcher failed"

@@ -881,20 +881,48 @@ EOF
 }
 
 test_external_wait_detail_stays_complete_without_unbounding_other_rows() {
-  local home fakebin json wait_detail long_working
+  local home mate fakebin json wait_detail secondmate_wait long_working long_hold
   home=$(make_home external-wait-detail); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
   long_working='ordinary working detail that is deliberately much longer than ninety characters because bearings should still bound unrelated task prose rather than globally removing its cap'
   printf 'working: %s\n' "$long_working" > "$home/state/ship-task.status"
   record_claude_state "$home/state" ship-task idle
+  secondmate_wait='External check running | build (ubuntu-latest, node 20) | https://github.com/kunchenguid/firstmate/pull/987 | since 2026-08-28 12:34 CEST | worker finished and healthy'
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+  printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate.status"
+  record_claude_state "$mate/state" mate idle
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   wait_detail='External check running | Release verification | https://github.com/kunchenguid/firstmate/pull/123 | since 2026-08-28 12:00 CEST | worker finished and healthy'
-  printf '%s' "$json" | jq -e --arg wait "$wait_detail" '
+  printf '%s' "$json" | jq -e --arg wait "$wait_detail" --arg mate_wait "mate: $secondmate_wait" '
     (.in_flight[] | select(.id == "external-wait") | .doing) == $wait
+      and (.secondmates[] | select(.id == "mate") | .doing) == $mate_wait
       and ((.in_flight[] | select(.id == "ship-task") | .doing) | endswith("…"))
       and ((.in_flight[] | select(.id == "ship-task") | .doing) | length == 91)
-  ' >/dev/null || fail "bearings truncated the external wait or unbounded unrelated detail: $json"
-  pass "bearings preserves the complete external-wait reason, PR URL, and healthy label without unbounding other rows"
+  ' >/dev/null || fail "bearings truncated an external wait or unbounded unrelated task detail: $json"
+
+  long_hold='ordinary secondmate hold reason that is intentionally far longer than the existing one hundred and twenty character cap so this unrelated prose must remain bounded even though typed external waits are preserved in full'
+  cat > "$mate/data/backlog.md" <<EOF
+## In flight
+- [ ] mate - Ordinary external hold (repo: firstmate) (kind: ship) (hold: $long_hold) (hold-kind: external) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | endswith("…")) and (($doing | length) == 121)
+  ' >/dev/null || fail "bearings unbounded an ordinary secondmate hold reason: $json"
+  pass "bearings preserves complete main and secondmate external waits without unbounding unrelated rows"
 }
 
 test_default_is_bounded_and_local_only() {

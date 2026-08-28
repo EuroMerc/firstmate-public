@@ -358,6 +358,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | . + {
            bearings_captain_holds:$captain_holds,
            bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
+           bearings_external_wait_holds:[.holds[]? | select((.external_wait_detail | type) == "string")],
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
@@ -374,14 +375,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        else empty end ]
      + [ $secondmate_views[]
        | {id,state:.bearings_state,
-          doing:((if .bearings_state == "active_child_work" then
-                    ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
-                  elif .bearings_state == "captain_decision" then
-                    ([.bearings_captain_holds[] | .summary] | join("; "))
-                  elif .bearings_state == "externally_held" then
-                    ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
-                  elif .bearings_state == "no_active_work" then "No active child work"
-                  else (.current.reason // "Current home state unavailable") end) | trunc(120)),
+          doing:(if .bearings_state == "externally_held"
+                    and (.bearings_external_wait_holds | length) > 0 then
+                   ([.bearings_external_wait_holds[] | .id + ": " + .external_wait_detail] | join("; "))
+                 else
+                   ((if .bearings_state == "active_child_work" then
+                       ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
+                     elif .bearings_state == "captain_decision" then
+                       ([.bearings_captain_holds[] | .summary] | join("; "))
+                     elif .bearings_state == "externally_held" then
+                       ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
+                     elif .bearings_state == "no_active_work" then "No active child work"
+                     else (.current.reason // "Current home state unavailable") end) | trunc(120))
+                 end),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
