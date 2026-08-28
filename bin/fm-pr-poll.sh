@@ -229,7 +229,7 @@ FIELDS
     case "$state" in
       merged) emit_structured_observation merged "$head"; exit 0 ;;
       closed) emit_structured_observation closed "$head"; exit 0 ;;
-      open|opened) ;;
+      open|opened|locked) ;;
       *) printf '%s\n' unreadable; exit 0 ;;
     esac
     case "$pipeline" in

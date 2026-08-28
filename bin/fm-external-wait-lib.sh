@@ -19,7 +19,10 @@
 #
 # fm_external_wait_publish_pr <state-dir> <task-id> <pr-url>
 #                             <registration-file> <observation>
-#   Accept one observation from fm-pr-poll.sh --observe-validated:
+#   Accept one observation from fm-pr-poll.sh --observe-phase-validated, the
+#   production form that carries the validated forge head phase continuity
+#   needs (--observe-validated is the head-less diagnostic form, and an
+#   observation without a head can never bind or change a phase head):
 #     pending<TAB><optional comma-separated check names>
 #     empty (GitHub reported no checks; registration-age grace decides pending)
 #     none (GitHub reported no checks once the startup grace expired)
@@ -32,8 +35,9 @@
 #   `empty` stays pending for FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS (default
 #   120) from the registration mtime, then becomes a truthful no-checks result.
 #   An unreadable observation is a gap in reading the same check run rather than
-#   the end of a wait, so a pending phase interrupted by one keeps its published
-#   start. A structured observation proving a different head, or pending after
+#   the end of a wait, so for the same head it keeps the interrupted phase whole
+#   - a pending phase keeps its published start, and a startup grace keeps both
+#   its epoch and its remaining time. A structured observation proving a different head, or pending after
 #   any other publisher state, starts a new phase; an unknown head never does.
 #   Append a standard paused/done/failed event only when its normalized
 #   registration-bound fingerprint changes (or a validated new head starts a
@@ -305,11 +309,14 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
     now=$(date +%s) || return 1
     # The startup grace is a one-way phase: it opens once per head and can only
     # be re-entered by a proven different head, so a same-head rollup that has
-    # already resolved to no-checks stays no-checks instead of oscillating.
+    # already resolved to no-checks stays no-checks instead of oscillating. An
+    # unreadable tick is a gap in the same phase, not the end of one, so it
+    # neither reopens the grace nor cuts the remaining time short.
     epoch=
     if [ "$head_changed" -eq 1 ]; then
       epoch=$now
-    elif [ "$phase_kind" = empty-pending ] && [ "$phase_epoch" -gt 0 ]; then
+    elif { [ "$phase_kind" = empty-pending ] || [ "$phase_kind" = unreadable ]; } \
+      && [ "$phase_epoch" -gt 0 ]; then
       epoch=$phase_epoch
     elif [ "$phase_kind" = unset ]; then
       epoch=$(fm_external_wait_file_mtime "$registration") || return 1
@@ -386,7 +393,12 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
       event="failed: $detail"
       ;;
     unreadable)
-      if [ "$head_changed" -eq 1 ]; then next_epoch=0; else next_epoch=$phase_epoch; fi
+      if [ "$head_changed" -eq 1 ]; then
+        next_epoch=0
+      else
+        next_epoch=$phase_epoch
+        record_kind=$phase_kind
+      fi
       detail="PR $url external check status unreadable"
       event="failed: $detail"
       ;;

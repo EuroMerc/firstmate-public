@@ -723,7 +723,7 @@ run_watcher_bounded() {
 # The validated PR observer and the status publisher are exercised through the
 # registration and watcher entrypoints, never by matching implementation bytes.
 test_external_check_visible_transitions() {
-  local dir state url out rc count
+  local dir state url out rc count first
   url=https://github.com/o/r/pull/52
 
   dir=$(make_case external-check-named)
@@ -831,6 +831,41 @@ test_external_check_visible_transitions() {
   [ "$(fm_external_wait_last_status_line "$state/task-a.status")" \
     = "done: PR $url no external checks reported" ] \
     || fail "a settled empty rollup oscillated back to a pending wait"
+
+  # An unreadable tick is a gap in reading the same head, not the end of the
+  # empty-rollup startup grace, so the grace keeps both its epoch and its
+  # remaining time and a still-empty rollup inside it stays the same wait.
+  dir=$(make_case external-check-empty-grace-unreadable)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_OBSERVATION=empty \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "empty-grace unreadable fixture did not arm"
+  first=$(fm_external_wait_last_status_line "$state/task-a.status")
+  case "$first" in
+    "paused: External PR checks pending | $url | since "*) ;;
+    *) fail "the empty-rollup startup grace did not publish a wait: $first" ;;
+  esac
+  set +e
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_FAIL=1 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/grace-unreadable.out" 2> "$dir/grace-unreadable.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "the unreadable tick inside the startup grace failed: $(cat "$dir/grace-unreadable.err")"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "a forge error inside the startup grace was not publisher-owned"
+  ack_watcher_cycle "$state" || fail "startup-grace unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/grace-resumed.out" 2> "$dir/grace-resumed.err" \
+    || fail "the empty rollup after an unreadable tick failed: $(cat "$dir/grace-resumed.err")"
+  assert_no_grep "no external checks reported" "$state/task-a.status" \
+    "an unreadable tick ended the empty-rollup startup grace early"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" = "$first" ] \
+    || fail "the resumed startup grace lost its first published start: $(cat "$state/task-a.status")"
 
   # An empty rollup observed after a same-head non-empty phase is a later
   # publisher phase, not a fresh startup: it resolves to no-checks directly
@@ -3511,10 +3546,26 @@ group/subgroup/project
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
   [ "$out" = closed ] || fail "GitLab observer did not classify exact closed state truthfully"
-  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+  out=$(FM_TEST_GLAB_STATE=not-a-merge-request-state FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
   [ "$out" = unreadable ] || fail "GitLab observer turned an unknown state into a terminal closure"
+  # `locked` is the transient state GitLab sets while it processes a merge. It
+  # was read successfully, so it classifies through the head pipeline like any
+  # other open merge request instead of becoming an actionable unreadable.
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=running \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = $'pending\tpipeline running' ] \
+    || fail "GitLab observer turned a readable locked merge request into an unreadable status, got: $out"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=success \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = green ] \
+    || fail "GitLab observer did not classify a locked merge request by its head pipeline, got: $out"
   out=$(FM_TEST_GLAB_OMIT_STATE=1 FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
