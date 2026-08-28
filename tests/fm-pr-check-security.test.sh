@@ -925,6 +925,19 @@ test_external_check_visible_transitions() {
   grep -qxF "failed: PR $url closed before merge" "$state/task-a.status" \
     || fail "closed PR was mislabeled as an external check failure"
   assert_poll_absent "$state" task-a
+
+  # A reopened PR that then merges must supersede this publisher's own closure.
+  ack_watcher_cycle "$state" || fail "closure wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent re-arm after reopening failed"
+  FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/reopened-merged.out" 2> "$dir/reopened-merged.err" \
+    || fail "merged watcher after a reopened closure failed"
+  grep -qxF "done: PR $url merged" "$state/task-a.status" \
+    || fail "a merge did not supersede this publisher's closure: $(cat "$state/task-a.status")"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" = "done: PR $url merged" ] \
+    || fail "the merged PR's persistent current state stayed a closure"
   pass "validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths"
 }
 
@@ -1011,6 +1024,69 @@ test_external_check_dedup_survives_worker_events() {
     *) fail "a restarted pending wait did not publish a fresh canonical start: $restarted" ;;
   esac
   pass "an unchanged pending wait stays one transition with a stable start across worker events and re-arms"
+}
+
+# An unreadable observation is a failed read of the same check run, not the end
+# of the wait, so the published start survives it. A registration re-armed for a
+# later head does start a new phase.
+test_external_check_unreadable_gap_keeps_wait_start() {
+  local dir state url first restarted today paused
+  url=https://github.com/o/r/pull/63
+  dir=$(make_case external-check-unreadable-gap)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent PR arming for the unreadable-gap fixture failed"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$state/task-a.pr-poll-registration"
+  add_stop_custom_check "$dir"
+  first="paused: External check running | build | $url | since 2026-03-29 03:30 CEST | worker finished and healthy"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p1.out" 2> "$dir/p1.err" \
+    || fail "first pending observation failed: $(cat "$dir/p1.err")"
+  grep -qxF "$first" "$state/task-a.status" \
+    || fail "the running wait was not published: $(cat "$state/task-a.status")"
+  ack_watcher_cycle "$state" || fail "first pending wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/u1.out" 2> "$dir/u1.err" || fail "unreadable observation failed"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "the unreadable read was not escalated"
+  ack_watcher_cycle "$state" || fail "unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p2.out" 2> "$dir/p2.err" \
+    || fail "pending observation after the unreadable gap failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  [ "$restarted" = "$first" ] \
+    || fail "an unreadable gap moved the running wait's start: $restarted"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 2 ] \
+    || fail "recovering from unreadable did not restore the wait as current state ($paused transitions)"
+  ack_watcher_cycle "$state" || fail "recovered pending wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/u2.out" 2> "$dir/u2.err" || fail "second unreadable observation failed"
+  ack_watcher_cycle "$state" || fail "second unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  # Re-arming records a later head, so the next pending phase is a new one.
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "re-arm for a later head failed"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p3.out" 2> "$dir/p3.err" \
+    || fail "pending observation after a later head failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  today=$(TZ=Europe/Berlin date '+%Y-%m-%d')
+  case "$restarted" in
+    *'since 2026-03-29 03:30 CEST'*)
+      fail "a wait re-armed for a later head kept the previous phase start: $restarted" ;;
+    *" | since $today "*) ;;
+    *) fail "a re-armed wait did not publish a fresh canonical start: $restarted" ;;
+  esac
+  pass "an unreadable read keeps the running wait's start while a later head starts a new phase"
 }
 
 # The GitHub observer is exercised against forge-shaped statusCheckRollup
@@ -3533,6 +3609,10 @@ seed_canonical_poll() {
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
 }
 
+fm_external_wait_last_status_line() {  # <status-log>
+  grep -v '^[[:space:]]*$' "$1" | tail -1
+}
+
 add_stop_custom_check() {
   local dir=$1 state
   state="$dir/home/state"
@@ -4077,6 +4157,7 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_external_check_visible_transitions
 test_external_check_dedup_survives_worker_events
+test_external_check_unreadable_gap_keeps_wait_start
 test_github_rollup_classification
 test_external_check_names_bound_is_utf8_safe
 test_rejected_metacharacter_bytes_are_inert

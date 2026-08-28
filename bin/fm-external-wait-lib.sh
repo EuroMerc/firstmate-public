@@ -30,6 +30,10 @@
 #     unreadable
 #   `empty` stays pending for FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS (default
 #   120) from the registration mtime, then becomes a truthful no-checks result.
+#   An unreadable observation is a gap in reading the same check run rather than
+#   the end of a wait, so a pending phase interrupted by one keeps its published
+#   start; every other publisher state, and a registration re-armed for a later
+#   head, starts a new phase.
 #   Append a standard paused/done/failed event only when its state differs from
 #   the most recent event this publisher itself wrote for the same canonical PR,
 #   so an unrelated worker event in between and a silent re-arm both keep an
@@ -200,20 +204,24 @@ fm_external_wait_pr_event_signature() {  # <event-line>
 }
 
 # The most recent event this publisher wrote for this canonical PR, ignoring
-# any worker event that landed in between.
-fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url>
-  local log=$1 pause_verb=$2 url=$3 line match=
+# any worker event that landed in between. With <ignore-unreadable> the
+# unreadable form is skipped, which yields the state the observed check run was
+# actually in rather than the last failed read of it.
+fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url> [ignore-unreadable]
+  local log=$1 pause_verb=$2 url=$3 ignore_unreadable=${4:-0} line match=
   [ -f "$log" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "$pause_verb: External check running | "*|"$pause_verb: External PR checks pending | "*)
         case "$line" in *" | $url | "*) match=$line ;; esac
         ;;
+      "failed: PR $url external check status unreadable")
+        [ "$ignore_unreadable" = 1 ] || match=$line
+        ;;
       "done: PR $url merged"|"done: PR $url checks green"|\
       "done: PR $url no external checks reported"|\
       "failed: PR $url closed before merge"|\
       "failed: PR $url external checks failed"|"failed: PR $url external checks failed | "*|\
-      "failed: PR $url external check status unreadable"|\
       "failed: PR $url no pipeline reported, not merge-ready")
         match=$line
         ;;
@@ -221,6 +229,32 @@ fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url>
   done < "$log"
   [ -n "$match" ] || return 1
   printf '%s\n' "$match"
+}
+
+fm_external_wait_epoch_from_display() {  # <YYYY-MM-DD HH:MM ZONE>
+  local display=$1
+  case "$display" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' '[0-9][0-9]:[0-9][0-9]' '*) ;;
+    *) return 1 ;;
+  esac
+  if [ "$(uname)" = Darwin ]; then
+    TZ=Europe/Berlin date -j -f '%Y-%m-%d %H:%M %Z' "$display" +%s 2>/dev/null
+  else
+    TZ=Europe/Berlin date -d "$display" +%s 2>/dev/null
+  fi
+}
+
+# A re-arm rewrites the validated registration, which is also how a later head
+# is recorded, so a registration newer than the running phase means the wait
+# restarted. An unparsable start keeps the published phase rather than
+# inventing a newer one.
+fm_external_wait_phase_restarted() {  # <registration> <published-since>
+  local registration=$1 since=$2 armed started
+  armed=$(fm_external_wait_file_mtime "$registration") || return 1
+  case "$armed" in ''|*[!0-9]*) return 1 ;; esac
+  started=$(fm_external_wait_epoch_from_display "$since") || return 1
+  case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$armed" -gt "$((started + 60))" ]
 }
 
 fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
@@ -231,6 +265,7 @@ fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
       "$pause_verb: External check running | "*|"$pause_verb: External PR checks pending | "*)
         case "$line" in *" | $url | "*) return 0 ;; esac
         ;;
+      "failed: PR $url closed before merge"|\
       "failed: PR $url external checks failed"*|"failed: PR $url external check status unreadable"|\
       "failed: PR $url no pipeline reported, not merge-ready")
         return 0
@@ -242,7 +277,7 @@ fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
 
 fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <observation>
   local state=$1 id=$2 url=$3 registration=$4 observation=$5 kind names epoch since detail event log pause_verb
-  local grace now age owned_last owned_since
+  local grace now age owned_last owned_phase owned_since
   FM_EXTERNAL_WAIT_CHANGED=0
   FM_EXTERNAL_WAIT_DISPLAY=
   case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -251,10 +286,11 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
   pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   log="$state/$id.status"
   owned_last=$(fm_external_wait_owned_pr_last_event "$log" "$pause_verb" "$url") || owned_last=
+  owned_phase=$(fm_external_wait_owned_pr_last_event "$log" "$pause_verb" "$url" 1) || owned_phase=
   owned_since=
-  case "$owned_last" in
+  case "$owned_phase" in
     *' | since '*' | worker finished and healthy')
-      owned_since=${owned_last%' | worker finished and healthy'}
+      owned_since=${owned_phase%' | worker finished and healthy'}
       owned_since=${owned_since##*' | since '}
       ;;
   esac
@@ -273,9 +309,13 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
   fi
   case "$kind" in
     pending)
-      if [ -n "$owned_since" ]; then
+      if [ -n "$owned_since" ] \
+        && { [ "$owned_last" = "$owned_phase" ] \
+             || ! fm_external_wait_phase_restarted "$registration" "$owned_since"; }; then
         # A still-running wait keeps the start it was first published with, so
-        # a silent re-arm cannot move it.
+        # neither a silent re-arm nor an unreadable read of it can move that
+        # start. Only a registration re-armed after the phase began, which is
+        # how a later head is recorded, ends it.
         since=$owned_since
       elif [ -n "$owned_last" ]; then
         # A pending phase that follows one of this publisher's non-pending

@@ -908,6 +908,18 @@ EOF
       and ((.in_flight[] | select(.id == "ship-task") | .doing) | length == 91)
   ' >/dev/null || fail "bearings truncated an external wait or unbounded unrelated task detail: $json"
 
+  # Only a genuine declared wait may keep its full detail: worker prose that
+  # merely opens with a wait label from any other state stays capped.
+  printf 'working: External wait | %s\n' "$long_working$long_working" > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight[] | select(.id == "ship-task") | .doing) as $doing
+    | ($doing | endswith("…")) and (($doing | length) == 91)
+  ' >/dev/null || fail "a non-paused row bypassed the bearings detail cap: $json"
+  printf 'working: %s\n' "$long_working" > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+
   long_hold='ordinary secondmate hold reason that is intentionally far longer than the existing one hundred and twenty character cap so this unrelated prose must remain bounded even though typed external waits are preserved in full'
   cat > "$mate/data/backlog.md" <<EOF
 ## In flight

@@ -313,12 +313,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
-  def in_flight_detail:
+  def in_flight_detail($declared_wait):
     tostring | gsub("\\s+"; " ")
-    | if startswith("External check running | ")
-         or startswith("External PR checks pending | ")
-         or startswith("External wait | ")
-      then . else trunc(90) end;
+    | if $declared_wait
+         and (startswith("External check running | ")
+              or startswith("External PR checks pending | ")
+              or startswith("External wait | "))
+      then trunc(1200) else trunc(90) end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -404,10 +405,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | ((.current_state.state == "paused")
+          and (.current_state.source == "status-log")) as $declared_wait
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | in_flight_detail)
+                | (if $d != "" then $d else (.hints.last_event_text // "") end)
+                | in_flight_detail($declared_wait))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
