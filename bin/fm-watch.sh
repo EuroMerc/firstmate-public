@@ -105,6 +105,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-external-wait-lib.sh
+. "$SCRIPT_DIR/fm-external-wait-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -604,7 +606,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  if status_is_captain_held "$(last_status_line "$statusf")"; then
+  if status_is_captain_held "$(fm_external_wait_worker_last_status_line "$statusf")"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   else
@@ -631,7 +633,8 @@ handle_paused_stale() {  # <window> <task> <hash>
 # classification.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
-  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+  if ! afk_present && status_is_paused_or_captain_held \
+    "$(fm_external_wait_worker_last_status_line "$STATE/$task.status")"; then
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
@@ -658,7 +661,7 @@ clear_pause_tracking() {  # <window-key>
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
-  last=$(last_status_line "$STATE/$task.status")
+  last=$(fm_external_wait_worker_last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
@@ -719,7 +722,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
   task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
+  last=$(fm_external_wait_worker_last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
@@ -1098,15 +1101,16 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
-# Shared by both the first-notification and already-notified paths below so
-# the retirement sequence (bin/fm-pr-lib.sh) is stated once.
-retire_merged_pr_poll() {  # <id>
-  local id=$1
-  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
+# Shared by definitive merged and closed paths so the identity-bound retirement
+# sequence (bin/fm-pr-lib.sh) is stated once. Recoverable red and unreadable
+# observations deliberately keep their poll.
+retire_terminal_pr_poll() {  # <id> <merged|closed>
+  local id=$1 result=$2
+  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$result"; then
     fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-      || triage_log "merged PR poll retirement remains recoverable for $id"
+      || triage_log "$result PR poll retirement remains recoverable for $id"
   else
-    triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+    triage_log "$result PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
 }
 
@@ -1214,7 +1218,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --observe-phase-validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
@@ -1228,9 +1232,46 @@ while :; do
           continue
         fi
       fi
+      if [ "$is_pr_poll" -eq 1 ]; then
+        case "$out" in
+          pending|pending$'\t'*|empty|empty$'\t'*|none|none$'\t'*|no-pipeline|no-pipeline$'\t'*|\
+          green|green$'\t'*|failed|failed$'\t'*|unreadable|unreadable$'\t'*)
+            if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" "$out"; then
+              reason="check: PR external-wait presentation failed for $id"
+              fm_wake_append check "$c" "$reason" || exit 1
+              touch "$STATE/.last-check"
+              wake "$reason"
+            fi
+            touch "$STATE/.last-check"
+            continue
+            ;;
+          closed|closed$'\t'*)
+            # Presentation is a best-effort layer over an already-published
+            # poll, so a failure here never preempts closure or retirement.
+            if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" closed; then
+              triage_log "PR external-wait presentation failed for $id: closed"
+              fm_wake_append check "$c" "check: PR closed before merge for $id could not be presented" \
+                || triage_log "closed presentation row could not be queued for $id"
+            fi
+            retire_terminal_pr_poll "$id" closed
+            touch "$STATE/.last-check"
+            continue
+            ;;
+          merged|merged$'\t'*)
+            # Clear a currently published wait before the existing merge wake
+            # and poll-retirement path removes its canonical registration.
+            fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" "$out" \
+              || triage_log "PR external-wait presentation failed for $id: merged"
+            out=merged
+            ;;
+        esac
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ] \
+        if [ "$is_pr_poll" -eq 1 ] && [ "${out%%$'\t'*}" = merged ] \
           && fm_pr_poll_merge_already_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number"; then
           # This exact merge was already surfaced to main once for this task
@@ -1240,17 +1281,17 @@ while :; do
           # identical detection is a no-op, not captain-facing progress
           # (AGENTS.md section 8): absorb it rather than enqueue another
           # main-blocking row, but still retire the poll so it stops firing.
-          retire_merged_pr_poll "$id"
+          retire_terminal_pr_poll "$id" merged
           triage_log "absorbed duplicate merged PR poll result for $id"
           touch "$STATE/.last-check"
           continue
         fi
         fm_wake_append check "$c" "$reason" || exit 1
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+        if [ "$is_pr_poll" -eq 1 ] && [ "${out%%$'\t'*}" = merged ]; then
           fm_pr_poll_merge_mark_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number" \
             || triage_log "merge notification receipt could not be recorded for $id"
-          retire_merged_pr_poll "$id"
+          retire_terminal_pr_poll "$id" merged
         fi
         touch "$STATE/.last-check"
         wake "$reason"
@@ -1333,7 +1374,7 @@ EOF
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
-    last=$(last_status_line "$STATE/$task.status")
+    last=$(fm_external_wait_worker_last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
@@ -1452,7 +1493,8 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+            if [ -e "$pf" ] || status_is_paused_or_captain_held \
+              "$(fm_external_wait_worker_last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
@@ -1482,7 +1524,7 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(fm_external_wait_worker_last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -1497,7 +1539,8 @@ EOF
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      if ! afk_present && status_is_paused_or_captain_held \
+        "$(fm_external_wait_worker_last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$key" ;;

@@ -159,7 +159,7 @@ EOF
     "kind=ship" \
     "mode=no-mistakes"
   record_claude_state "$home/state" external-wait idle
-  printf 'paused: declared external-wait for upstream release\n' > "$home/state/external-wait.status"
+  printf 'paused: External check running | Release verification | https://github.com/kunchenguid/firstmate/pull/123 | since 2026-08-28 12:00 CEST | worker finished and healthy\n' > "$home/state/external-wait.status"
   # The secondmate's OWN home backlog records a merge it managed. This lands in the
   # secondmate home, never the main backlog, so landed-work views only see it via the
   # bounded cross-home Done roll-up.
@@ -878,6 +878,194 @@ EOF
       and (.in_flight | any(.doing == "Phase 7 started") | not)
   ' >/dev/null || fail "prior status report influenced the standalone snapshot: $two"
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
+}
+
+test_external_wait_detail_stays_complete_without_unbounding_other_rows() {
+  local home mate fakebin json wait_detail secondmate_wait long_working long_hold extra
+  home=$(make_home external-wait-detail); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  long_working='ordinary working detail that is deliberately much longer than ninety characters because bearings should still bound unrelated task prose rather than globally removing its cap'
+  printf 'working: %s\n' "$long_working" > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+  secondmate_wait='External check running | build (ubuntu-latest, node 20) | https://github.com/kunchenguid/firstmate/pull/987 | since 2026-08-28 12:34 CEST | worker finished and healthy'
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+  printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate.status"
+  record_claude_state "$mate/state" mate idle
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  wait_detail='External check running | Release verification | https://github.com/kunchenguid/firstmate/pull/123 | since 2026-08-28 12:00 CEST | worker finished and healthy'
+  printf '%s' "$json" | jq -e --arg wait "$wait_detail" --arg mate_wait "mate: $secondmate_wait" '
+    (.in_flight[] | select(.id == "external-wait") | .doing) == $wait
+      and (.secondmates[] | select(.id == "mate") | .doing) == $mate_wait
+      and ((.in_flight[] | select(.id == "ship-task") | .doing) | endswith("…"))
+      and ((.in_flight[] | select(.id == "ship-task") | .doing) | length == 91)
+  ' >/dev/null || fail "bearings truncated an external wait or unbounded unrelated task detail: $json"
+
+  # Only a genuine declared wait may keep its full detail: worker prose that
+  # merely opens with a wait label from any other state stays capped.
+  printf 'working: External wait | %s\n' "$long_working$long_working" > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight[] | select(.id == "ship-task") | .doing) as $doing
+    | ($doing | endswith("…")) and (($doing | length) == 91)
+  ' >/dev/null || fail "a non-paused row bypassed the bearings detail cap: $json"
+  printf 'working: %s\n' "$long_working" > "$home/state/ship-task.status"
+  record_claude_state "$home/state" ship-task idle
+
+  # A secondmate child gets the typed field only from a reconciled paused
+  # status-log wait; blocked prose imitating the complete label stays bounded.
+  printf 'blocked: %s copied worker prose that must not become typed\n' "$secondmate_wait" > "$mate/state/mate.status"
+  record_claude_state "$mate/state" mate idle
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | endswith("…")) and (($doing | length) == 121)
+      and (($doing | contains("worker finished and healthy copied")) | not)
+  ' >/dev/null || fail "a non-paused secondmate row gained typed external-wait provenance: $json"
+  printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate.status"
+  record_claude_state "$mate/state" mate idle
+
+  long_hold='ordinary secondmate hold reason that is intentionally far longer than the existing one hundred and twenty character cap so this unrelated prose must remain bounded even though typed external waits are preserved in full'
+  cat > "$mate/data/backlog.md" <<EOF
+## In flight
+- [ ] mate - Ordinary external hold (repo: firstmate) (kind: ship) (hold: $long_hold) (hold-kind: external) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | endswith("…")) and (($doing | length) == 121)
+  ' >/dev/null || fail "bearings unbounded an ordinary secondmate hold reason: $json"
+
+  # A mixed hold set keeps the typed wait complete AND still reports every other
+  # hold under its own cap, rather than replacing the hold list.
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)
+- [ ] mate-b - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+  printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate.status"
+  fm_write_meta "$mate/state/mate-b.meta" \
+    "window=firstmate:fm-mate-b" "worktree=$mate/projects/mate" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-b idle
+  printf 'blocked: blocked by unresolved-dep-7\n' > "$mate/state/mate-b.status"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg mate_wait "mate: $secondmate_wait" '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | contains($mate_wait))
+      and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
+  ' >/dev/null || fail "a typed secondmate wait hid an unrelated hold from bearings: $json"
+
+  # More concurrent waits than one row may render in full: the first three stay
+  # complete, the remainder is counted, and unrelated holds stay visible.
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    for extra in 2 3 4; do
+      printf -- '- [ ] mate-w%s - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$extra"
+    done
+    printf -- '- [ ] mate-b - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for extra in 2 3 4; do
+    fm_write_meta "$mate/state/mate-w$extra.meta" \
+      "window=firstmate:fm-mate-w$extra" "worktree=$mate/projects/mate" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "mate-w$extra" idle
+    printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate-w$extra.status"
+  done
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg mate_wait "mate: $secondmate_wait" '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | contains($mate_wait))
+      and ($doing | contains("+1 more external waits"))
+      and (($doing | contains("mate-w4: ")) | not)
+      and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
+  ' >/dev/null || fail "many secondmate waits were neither bounded nor counted: $json"
+
+  # The ordinary holds beside a typed wait carry the same shape as the wait
+  # list: the first three under the per-hold cap, then their own remainder, so
+  # one row cannot grow without bound through the hold list either.
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    for extra in 2 3 4; do
+      printf -- '- [ ] mate-w%s - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$extra"
+    done
+    printf -- '- [ ] mate-b - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    for extra in 2 3 4; do
+      printf -- '- [ ] mate-b%s - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$extra"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for extra in 2 3 4; do
+    fm_write_meta "$mate/state/mate-b$extra.meta" \
+      "window=firstmate:fm-mate-b$extra" "worktree=$mate/projects/mate" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "mate-b$extra" idle
+    printf 'blocked: blocked by unresolved-dep-%s\n' "$extra" > "$mate/state/mate-b$extra.status"
+  done
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | contains("+1 more external waits"))
+      and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
+      and ($doing | contains("mate-b3: blocked by unresolved-dep-3"))
+      and (($doing | contains("mate-b4: ")) | not)
+      and ($doing | contains("+1 more holds"))
+  ' >/dev/null || fail "ordinary secondmate holds beside a typed wait were unbounded: $json"
+  pass "bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows"
+}
+
+# A captain_decision home renders the narrowed backlog hold set. A typed
+# external wait on a hold that narrowing excluded must stay excluded rather than
+# reappearing through the external-wait branch.
+test_captain_decision_home_keeps_its_narrowed_hold_set() {
+  local home mate fakebin json wait
+  home=$(make_home captain-decision-holds); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  wait='External check running | build | https://github.com/kunchenguid/firstmate/pull/987 | since 2026-08-28 12:34 CEST | worker finished and healthy'
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-08-28)
+- [ ] mate-w - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+- [ ] mate-ext - Ordinary external hold (repo: firstmate) (kind: ship) (hold: vendor maintenance window) (hold-kind: external)
+
+## Done
+EOF
+  printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
+  fm_write_meta "$mate/state/mate-w.meta" \
+    "window=firstmate:fm-mate-w" "worktree=$mate/projects/mate" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-w idle
+  printf 'paused: %s\n' "$wait" > "$mate/state/mate-w.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate")) as $m
+    | ($m.state == "externally_held")
+      and ($m.doing | contains("vendor maintenance window"))
+      and (($m.doing | contains("External check running")) | not)
+  ' >/dev/null || fail "a captain_decision home rendered a hold its own narrowing excluded: $json"
+  pass "a captain_decision secondmate row renders only its narrowed hold set"
 }
 
 test_default_is_bounded_and_local_only() {
@@ -1953,6 +2141,8 @@ test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
+test_external_wait_detail_stays_complete_without_unbounding_other_rows
+test_captain_decision_home_keeps_its_narrowed_hold_set
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges

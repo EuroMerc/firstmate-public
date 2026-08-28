@@ -6,6 +6,53 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## External-wait presentation matrix
+
+The fleet-wide external-wait presentation was verified on 2026-08-28 at the final validated change head with GNU Bash 5.2.21, ShellCheck 0.11.0, jq 1.7, GitHub CLI 2.45.0, and gh-axi 0.1.33.
+The source is structural: every worker receives the same generated direct-PR instructions, every PR transition enters the existing validated poll and append-only status event path, and every current-state and fleet renderer consumes the same reconciled detail.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and worker-only Muse therefore need no harness-specific rendered-text classifier or final-output adapter for this behavior.
+The primary-capable subset uses the same status and fleet projection after the worker idles, so primary presentation is also harness-independent.
+Tmux, Herdr, Zellij, Orca, and cmux remain unaffected at their backend integration boundary because their adapters supply endpoint presence, capture, and liveness only; no backend renders or stores the external-wait label.
+Herdr's optional visual projection shows the worker's ordinary final output and therefore inherits the same direct-PR line without a lifecycle or projection change.
+Remote secondmates inherit the same current-state formatter after their routed status reaches the parent, while transport and endpoint reconciliation remain unchanged.
+
+Exact verification commands:
+
+```sh
+PATH="$HOME/.local/bin:$PATH" bin/fm-lint.sh
+bin/fm-test-run.sh tests/fm-brief.test.sh tests/fm-crew-state.test.sh tests/fm-fleet-snapshot-view.test.sh
+bin/fm-test-run.sh tests/fm-bearings-snapshot.test.sh tests/fm-pr-check-security.test.sh
+bin/fm-doc-audience-check.sh
+```
+
+Bounded observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+ok - fm-brief.sh: faster paths use configured authority without stacked review
+ok - no run + idle pane on a paused: status reports the visible external wait with its reason
+ok - worker-declared external wait renders Europe/Berlin daylight-saving time
+ok - a verbose worker-declared reason is bounded while required wait fields stay complete
+ok - an imitated PR wait label is bounded and labelled as a worker-declared wait
+ok - fleet snapshot and human view retain the current external-wait detail
+ok - bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows
+ok - a captain_decision secondmate row renders only its narrowed hold set
+ok - validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths
+ok - an unchanged pending wait stays one transition with a stable start across worker events and re-arms
+ok - GitHub phase continuity follows validated head identity across unknown, re-arm, unreadable, and head change
+ok - GitLab phase continuity follows validated head identity across unknown, re-arm, unreadable, and head change
+ok - GitHub rollup payloads classify, bound and sanitize their observation through the real CLI parser
+ok - bounded multibyte forge check names stay valid UTF-8 in persistent state
+fm-doc-audience-check: ok surfaces=74 local_links=283
+```
+
+The PR behavior regression covers the first-open observation opt-in, silent pre-merge-style re-arms, non-fatal presentation warnings after successful poll publication, a named pending check, a pending state without names, deterministic registration-bound fingerprint deduplication, validated GitHub and GitLab head continuity across unknown-to-known binding, same-head re-arm, unreadable gaps, and proved head changes, registration-age handling for an initially empty GitHub rollup and its one-way startup grace (an unreadable tick keeps the grace's epoch and remaining time, while a same-head phase that already resolved cannot reopen it), green continuation, merge clearing after an intervening recoverable failure including a skipped GitLab pipeline, truthful closure and poll retirement, named failure escalation with continued monitoring, structured GitLab `open`, `opened`, and transient `locked` state with its pipeline classification, and the full canonical URL without retaining raw forge output.
+The bearings regression preserves that full wait through both the main-home task row and the narrowly typed secondmate-home summary field while proving unrelated task and secondmate hold detail remains capped, that a mixed secondmate hold set still lists its non-wait holds, and that a captain-decision home renders only its own narrowed hold set.
+The presentation owner returns a value below its bound unchanged and, after a genuine cut, drops at most the one multibyte sequence the cut split, so a non-ASCII check name is identical under a byte-oriented and a character-aware locale; the parent additionally caps an ingested secondmate wait detail at 1200 characters, above the largest wait its own publisher can produce.
+The brief regression separately pins that opening the PR remains direct-PR completion, that the worker performs one non-watching read only, that its timestamp comes from the Europe/Berlin zone command rather than model inference, and that its final visible output labels a pending external check without appending a worker pause.
+The DST regression sets the canonical status mtime to 2026-03-29 01:30 UTC and observes `2026-03-29 03:30 CEST`, proving Europe/Berlin zone rules rather than a fixed offset.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

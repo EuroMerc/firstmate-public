@@ -1,16 +1,38 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
+# Its legacy --validated and sidecar forms emit exactly one `merged` line for a
+# merged PR or MR and stay silent otherwise, including on every error.
+# The watcher uses --observe-phase-validated with the same validated identity
+# to emit kind<TAB>validated-head-or--<TAB>optional-names. The diagnostic
+# --observe-validated form emits the same classification without the phase head.
+# Both forms emit one structural observation: merged, closed, green, empty,
+# no-pipeline, unreadable, pending, or failed, plus a sanitized qualifier after
+# one tab when the forge supplies one (the diagnostic form keeps that qualifier
+# only for pending and failed). `empty` is a GitHub rollup whose startup
+# grace is decided from the existing registration timestamp by
+# bin/fm-external-wait-lib.sh; `no-pipeline` is a GitLab response whose head
+# pipeline is absent or `skipped` (the qualifier names which), and firstmate's
+# own merge path refuses both, so it is reported as an actionable
+# not-merge-ready state rather than delivery readiness. A
+# rollup member of an unrecognized type can never claim green: it reports
+# unreadable unless a readable member is already red or still running.
+# It never waits or loops; bin/fm-watch.sh owns cadence and the shared external-
+# wait presentation owner deduplicates unchanged observations.
+# The provider-tagged identity is data in the sidecar and is never interpolated
+# into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+observe=0
+phase=0
+if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --observe-validated ] || [ "$1" = --observe-phase-validated ]; }; then
+  case "$1" in
+    --observe-validated) observe=1 ;;
+    --observe-phase-validated) observe=1; phase=1 ;;
+  esac
   provider=$2
   url=$3
   host=$4
@@ -45,6 +67,29 @@ case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
 
+emit_observation() {  # <phase-shaped observation>
+  local raw=$1 kind rest names
+  if [ "$phase" -eq 0 ]; then
+    case "$raw" in
+      *$'\t'*$'\t'*)
+        kind=${raw%%$'\t'*}
+        rest=${raw#*$'\t'}
+        names=${rest#*$'\t'}
+        case "$kind" in
+          pending|failed) [ -z "$names" ] || { printf '%s\t%s\n' "$kind" "$names"; return 0; } ;;
+        esac
+        printf '%s\n' "$kind"
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s\n' "$raw"
+}
+
+emit_structured_observation() {  # <kind> <validated-head|-> [names]
+  emit_observation "$1"$'\t'"$2"$'\t'"${3:-}"
+}
+
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot redirect this poll at another host or project.
@@ -62,8 +107,51 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    if [ "$observe" -eq 0 ]; then
+      state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+      [ "$state" = MERGED ] && printf '%s\n' merged
+      exit 0
+    fi
+    # gh applies this jq expression before returning output, so raw forge JSON
+    # never enters fleet state. Names are control-stripped, pipe-neutralized,
+    # bounded, and limited before they cross the process boundary.
+    # shellcheck disable=SC2016 # The single-quoted program is gh's jq expression.
+    observation=$(gh pr view "$url" --json state,headRefOid,statusCheckRollup -q '
+      .state as $pr
+      | ((.headRefOid // "") | tostring
+         | if test("^([0-9a-f]{40}|[0-9a-f]{64})$") then . else "-" end) as $head
+      | [(.statusCheckRollup // [])[]
+          | if .__typename == "CheckRun" then
+              {name:(.name // ""),
+               pending:(.status != "COMPLETED"
+                        or ((.conclusion // "") == "ACTION_REQUIRED")),
+               failed:(.status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","STARTUP_FAILURE","STALE"))),
+               unknown:false}
+            elif .__typename == "StatusContext" then
+              {name:(.context // ""), pending:(.state == "PENDING" or .state == "EXPECTED"),
+               failed:((.state // "") | IN("ERROR","FAILURE")), unknown:false}
+            else {name:"",pending:false,failed:false,unknown:true} end
+        ] as $checks
+      | def names($which):
+          [$checks[] | select(.[$which]) | .name
+           | (explode | map(if . < 32 or . == 127 or . == 124 then 32 else . end) | implode)
+           | gsub("^ +| +$"; "") | .[:120] | select(length > 0)][0:5]
+          | join(", ");
+      (if $pr == "MERGED" then {kind:"merged",names:""}
+       elif $pr == "CLOSED" then {kind:"closed",names:""}
+       elif any($checks[]; .failed) then {kind:"failed",names:names("failed")}
+       elif any($checks[]; .pending) then {kind:"pending",names:names("pending")}
+       elif any($checks[]; .unknown) then {kind:"unreadable",names:""}
+       elif ($checks | length) == 0 then {kind:"empty",names:""}
+       else {kind:"green",names:""} end)
+      | .kind + "\t" + $head + "\t" + .names
+    ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
+    case "$observation" in
+      '') ;;
+      merged$'\t'*|closed$'\t'*|green$'\t'*|empty$'\t'*|unreadable$'\t'*|pending$'\t'*|failed$'\t'*|\
+      merged|closed|green|empty|unreadable|pending|failed) emit_observation "$observation" ;;
+      *) printf '%s\n' unreadable ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -93,17 +181,67 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
-    # glab resolves the instance from the project URL passed to -R, so the host
-    # comes from the validated record rather than glab's configured default.
+    # glab receives the validated host both as GITLAB_HOST and in the project
+    # URL passed to -R, so it never falls through to a configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    if [ "$observe" -eq 0 ]; then
+      # The legacy merged-only poll keeps its established text contract: only
+      # exact `merged` wakes, while changed or unreadable output stays silent.
+      raw=$(GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+      [ "$state" = merged ] && printf '%s\n' merged
+      exit 0
+    fi
+
+    # The richer observation reads state, canonical head, and head-pipeline
+    # status from glab's structured merge-request response. jq emits only three
+    # bounded named scalars; raw forge JSON never reaches fleet state or disk.
+    json=$(GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) \
+      || { printf '%s\n' unreadable; exit 0; }
+    fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "pipeline=" + ((.head_pipeline.status // "") | tostring),
+        "head=" + ((.sha // "") | tostring)
+      else error("merge request payload is not an object") end
+    ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
+    total=0
+    named=0
+    state=
+    pipeline=
+    head=-
+    while IFS= read -r field; do
+      total=$((total + 1))
+      case "$field" in
+        state=*) state=${field#state=} ;;
+        pipeline=*) pipeline=${field#pipeline=} ;;
+        head=*) candidate_head=${field#head=} ;;
+        *) continue ;;
+      esac
+      named=$((named + 1))
+    done <<FIELDS
+$fields
+FIELDS
+    [ "$total" -eq 3 ] && [ "$named" -eq 3 ] \
+      || { printf '%s\n' unreadable; exit 0; }
+    if [[ "${candidate_head:-}" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
+      head=$candidate_head
+    fi
+    case "$state" in
+      merged) emit_structured_observation merged "$head"; exit 0 ;;
+      closed) emit_structured_observation closed "$head"; exit 0 ;;
+      open|opened|locked) ;;
+      *) printf '%s\n' unreadable; exit 0 ;;
+    esac
+    case "$pipeline" in
+      success|passed) emit_structured_observation green "$head" ;;
+      failed|canceled|cancelled) emit_structured_observation failed "$head" "pipeline $pipeline" ;;
+      created|preparing|pending|running|waiting_for_resource|scheduled|manual|canceling|cancelling)
+        emit_structured_observation pending "$head" "pipeline $pipeline" ;;
+      ''|skipped) emit_structured_observation no-pipeline "$head" "$pipeline" ;;
+      *) emit_structured_observation unreadable "$head" ;;
+    esac
     ;;
   *) exit 0 ;;
 esac

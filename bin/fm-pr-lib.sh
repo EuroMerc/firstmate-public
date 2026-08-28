@@ -44,6 +44,10 @@ FM_PR_REG_DATA_HASH=
 FM_PR_REG_TEMPLATE_HASH=
 FM_PR_REG_DATA_IDENTITY=
 FM_PR_REG_CHECK_IDENTITY=
+FM_PR_REG_PHASE_HEAD=
+FM_PR_REG_PHASE_KIND=
+FM_PR_REG_PHASE_EPOCH=
+FM_PR_REG_PHASE_SIGNATURE=
 FM_PR_POLL_DATA_TMP=
 FM_PR_POLL_CHECK_TMP=
 FM_PR_POLL_REG_TMP=
@@ -60,6 +64,10 @@ FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
 FM_PR_POLL_EXPECT_CHECK_IDENTITY=
+FM_PR_POLL_EXPECT_PHASE_HEAD=
+FM_PR_POLL_EXPECT_PHASE_KIND=
+FM_PR_POLL_EXPECT_PHASE_EPOCH=
+FM_PR_POLL_EXPECT_PHASE_SIGNATURE=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_SNAPSHOT_ID=
@@ -263,6 +271,16 @@ fm_pr_sha256() {
   fi
 }
 
+fm_pr_sha256_text() {  # <text>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -362,14 +380,14 @@ fm_pr_poll_data_parse() {
   FM_PR_DATA_NUMBER=$FM_PR_NUMBER
 }
 
-# Registration layout: version tag, task id, then the same provider-tagged
-# identity as the sidecar, then the two hashes and the two file identities.
-# The version tag moved to v2 with the provider tag, so a registration written
-# by the previous release is recognised as old and refused. The non-executing
-# migration in bin/fm-pr-check-migrate.sh then rebuilds that poll from the
+# Registration layout: version tag, task id, the provider-tagged sidecar
+# identity, two hashes, two file identities, then the mutable observation-phase
+# head, kind, epoch, and fingerprint. Version v3 added those phase fields. A
+# prior version is refused and rebuilt by the non-executing migration from the
 # task's recorded pull request URL.
 fm_pr_poll_registration_parse() {
-  local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity
+  local file=$1 version id provider url host path number data_hash template_hash
+  local data_identity check_identity phase_head phase_kind phase_epoch phase_signature
   FM_PR_REG_ID=
   FM_PR_REG_PROVIDER=
   FM_PR_REG_URL=
@@ -380,6 +398,10 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=
   FM_PR_REG_DATA_IDENTITY=
   FM_PR_REG_CHECK_IDENTITY=
+  FM_PR_REG_PHASE_HEAD=
+  FM_PR_REG_PHASE_KIND=
+  FM_PR_REG_PHASE_EPOCH=
+  FM_PR_REG_PHASE_SIGNATURE=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 7< "$file" || return 1
   IFS= read -r version <&7 || { exec 7<&-; return 1; }
@@ -393,12 +415,16 @@ fm_pr_poll_registration_parse() {
   IFS= read -r template_hash <&7 || { exec 7<&-; return 1; }
   IFS= read -r data_identity <&7 || { exec 7<&-; return 1; }
   IFS= read -r check_identity <&7 || { exec 7<&-; return 1; }
+  IFS= read -r phase_head <&7 || { exec 7<&-; return 1; }
+  IFS= read -r phase_kind <&7 || { exec 7<&-; return 1; }
+  IFS= read -r phase_epoch <&7 || { exec 7<&-; return 1; }
+  IFS= read -r phase_signature <&7 || { exec 7<&-; return 1; }
   if IFS= read -r _extra <&7; then
     exec 7<&-
     return 1
   fi
   exec 7<&-
-  [ "$version" = fm-pr-poll-registration-v2 ] || return 1
+  [ "$version" = fm-pr-poll-registration-v3 ] || return 1
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
@@ -409,6 +435,10 @@ fm_pr_poll_registration_parse() {
   [[ "$template_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$data_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [ "$phase_head" = - ] || fm_pr_head_valid "$phase_head" || return 1
+  case "$phase_kind" in unset|pending|empty-pending|unreadable|green|none|no-pipeline|failed) ;; *) return 1 ;; esac
+  case "$phase_epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$phase_signature" = - ] || [[ "$phase_signature" =~ ^[0-9a-f]{64}$ ]] || return 1
   FM_PR_REG_ID=$id
   FM_PR_REG_PROVIDER=$FM_PR_PROVIDER
   FM_PR_REG_URL=$FM_PR_URL
@@ -419,6 +449,42 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_TEMPLATE_HASH=$template_hash
   FM_PR_REG_DATA_IDENTITY=$data_identity
   FM_PR_REG_CHECK_IDENTITY=$check_identity
+  FM_PR_REG_PHASE_HEAD=$phase_head
+  FM_PR_REG_PHASE_KIND=$phase_kind
+  FM_PR_REG_PHASE_EPOCH=$phase_epoch
+  FM_PR_REG_PHASE_SIGNATURE=$phase_signature
+}
+
+fm_pr_poll_registration_phase_update() {  # <registration> <head|-> <kind> <epoch> <signature|->
+  local registration=$1 phase_head=$2 phase_kind=$3 phase_epoch=$4 phase_signature=$5
+  local device before_hash before_identity tmp
+  [ "$phase_head" = - ] || fm_pr_head_valid "$phase_head" || return 1
+  case "$phase_kind" in unset|pending|empty-pending|unreadable|green|none|no-pipeline|failed) ;; *) return 1 ;; esac
+  case "$phase_epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$phase_signature" = - ] || [[ "$phase_signature" =~ ^[0-9a-f]{64}$ ]] || return 1
+  device=$(fm_pr_file_device "${registration%/*}") || return 1
+  fm_pr_private_file_valid "$registration" 600 "$device" || return 1
+  before_hash=$(fm_pr_sha256 "$registration") || return 1
+  before_identity=$(fm_pr_file_identity "$registration") || return 1
+  fm_pr_poll_registration_parse "$registration" || return 1
+  tmp=$(mktemp "${registration%/*}/.fm-pr-poll-phase.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-registration-v3 "$FM_PR_REG_ID" "$FM_PR_REG_PROVIDER" "$FM_PR_REG_URL" \
+      "$FM_PR_REG_HOST" "$FM_PR_REG_PATH" "$FM_PR_REG_NUMBER" "$FM_PR_REG_DATA_HASH" \
+      "$FM_PR_REG_TEMPLATE_HASH" "$FM_PR_REG_DATA_IDENTITY" "$FM_PR_REG_CHECK_IDENTITY" \
+      "$phase_head" "$phase_kind" "$phase_epoch" "$phase_signature" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$device" \
+    || ! fm_pr_poll_registration_parse "$tmp" \
+    || ! fm_pr_private_file_valid "$registration" 600 "$device" \
+    || [ "$(fm_pr_sha256 "$registration")" != "$before_hash" ] \
+    || [ "$(fm_pr_file_identity "$registration")" != "$before_identity" ] \
+    || ! mv -f -- "$tmp" "$registration" \
+    || ! fm_pr_private_file_valid "$registration" 600 "$device" \
+    || ! fm_pr_poll_registration_parse "$registration"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 fm_pr_poll_cleanup() {
@@ -475,6 +541,22 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_TEMPLATE=$template
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
+  FM_PR_POLL_EXPECT_PHASE_HEAD=-
+  FM_PR_POLL_EXPECT_PHASE_KIND='unset'
+  FM_PR_POLL_EXPECT_PHASE_EPOCH=0
+  FM_PR_POLL_EXPECT_PHASE_SIGNATURE=-
+  # A silent re-arm replaces the identity-bound poll files but preserves the
+  # observation phase for the same canonical PR. A later structured
+  # observation, not this filesystem operation, proves whether the head moved.
+  if fm_pr_poll_artifacts_valid "$state" "$id" "$template" \
+    && [ "$FM_PR_REG_PROVIDER" = "$provider" ] && [ "$FM_PR_REG_URL" = "$url" ] \
+    && [ "$FM_PR_REG_HOST" = "$host" ] && [ "$FM_PR_REG_PATH" = "$path" ] \
+    && [ "$FM_PR_REG_NUMBER" = "$number" ]; then
+    FM_PR_POLL_EXPECT_PHASE_HEAD=$FM_PR_REG_PHASE_HEAD
+    FM_PR_POLL_EXPECT_PHASE_KIND=$FM_PR_REG_PHASE_KIND
+    FM_PR_POLL_EXPECT_PHASE_EPOCH=$FM_PR_REG_PHASE_EPOCH
+    FM_PR_POLL_EXPECT_PHASE_SIGNATURE=$FM_PR_REG_PHASE_SIGNATURE
+  fi
   FM_PR_POLL_DATA_TMP=$(mktemp "$state/.fm-pr-poll-data.XXXXXX") || return 1
   FM_PR_POLL_CHECK_TMP=$(mktemp "$state/.fm-pr-poll-check.XXXXXX") || {
     fm_pr_poll_cleanup
@@ -505,17 +587,23 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_TEMPLATE_HASH=$(fm_pr_sha256 "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup; return 1; }
   FM_PR_POLL_EXPECT_DATA_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_DATA_TMP") || { fm_pr_poll_cleanup; return 1; }
   FM_PR_POLL_EXPECT_CHECK_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup; return 1; }
-  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-      fm-pr-poll-registration-v2 "$id" "$provider" "$url" "$host" "$path" "$number" \
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-registration-v3 "$id" "$provider" "$url" "$host" "$path" "$number" \
       "$FM_PR_POLL_EXPECT_DATA_HASH" "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" \
       "$FM_PR_POLL_EXPECT_DATA_IDENTITY" "$FM_PR_POLL_EXPECT_CHECK_IDENTITY" \
+      "$FM_PR_POLL_EXPECT_PHASE_HEAD" "$FM_PR_POLL_EXPECT_PHASE_KIND" \
+      "$FM_PR_POLL_EXPECT_PHASE_EPOCH" "$FM_PR_POLL_EXPECT_PHASE_SIGNATURE" \
       > "$FM_PR_POLL_REG_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_REG_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_REG_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! fm_pr_poll_registration_parse "$FM_PR_POLL_REG_TMP" \
     || [ "$FM_PR_REG_ID" != "$id" ] \
     || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
-    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ]; then
+    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ] \
+    || [ "$FM_PR_REG_PHASE_HEAD" != "$FM_PR_POLL_EXPECT_PHASE_HEAD" ] \
+    || [ "$FM_PR_REG_PHASE_KIND" != "$FM_PR_POLL_EXPECT_PHASE_KIND" ] \
+    || [ "$FM_PR_REG_PHASE_EPOCH" != "$FM_PR_POLL_EXPECT_PHASE_EPOCH" ] \
+    || [ "$FM_PR_REG_PHASE_SIGNATURE" != "$FM_PR_POLL_EXPECT_PHASE_SIGNATURE" ]; then
     fm_pr_poll_cleanup
     return 1
   fi
@@ -562,7 +650,11 @@ fm_pr_poll_publish_prepared() {
     || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
     || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ] \
     || [ "$FM_PR_REG_DATA_IDENTITY" != "$FM_PR_POLL_EXPECT_DATA_IDENTITY" ] \
-    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$FM_PR_POLL_EXPECT_CHECK_IDENTITY" ]; then
+    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$FM_PR_POLL_EXPECT_CHECK_IDENTITY" ] \
+    || [ "$FM_PR_REG_PHASE_HEAD" != "$FM_PR_POLL_EXPECT_PHASE_HEAD" ] \
+    || [ "$FM_PR_REG_PHASE_KIND" != "$FM_PR_POLL_EXPECT_PHASE_KIND" ] \
+    || [ "$FM_PR_REG_PHASE_EPOCH" != "$FM_PR_POLL_EXPECT_PHASE_EPOCH" ] \
+    || [ "$FM_PR_REG_PHASE_SIGNATURE" != "$FM_PR_POLL_EXPECT_PHASE_SIGNATURE" ]; then
     fm_pr_poll_revoke_final || true
     return 1
   fi
@@ -705,7 +797,7 @@ fm_pr_poll_retirement_parse() {
   [[ "$check_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   [[ "$reg_hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   [[ "$reg_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-  [ "$result" = merged ] || return 1
+  case "$result" in merged|closed) ;; *) return 1 ;; esac
   FM_PR_RETIRE_ID=$id
   FM_PR_RETIRE_PROVIDER=$provider
   FM_PR_RETIRE_URL=$url
@@ -852,7 +944,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
-  [ "$result" = merged ] || return 1
+  case "$result" in merged|closed) ;; *) return 1 ;; esac
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   receipt="$state/$id.pr-poll-retirement"
@@ -874,7 +966,7 @@ fm_pr_poll_retirement_publish() {
       "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" \
       "$FM_PR_POLL_SNAPSHOT_REG_HASH" \
       "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" \
-      merged > "$tmp" \
+      "$result" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_poll_retirement_parse "$tmp" \

@@ -81,6 +81,28 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *statusCheckRollup*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    if [ -n "${FM_TEST_GH_ROLLUP:-}" ]; then
+      # Reproduce the real CLI for this form: gh applies the caller's own -q
+      # program to the requested JSON object, so the observer's classification
+      # runs against forge-shaped payload bytes through the real jq.
+      prev=
+      program=
+      for arg in "$@"; do
+        [ "$prev" = -q ] && program=$arg
+        prev=$arg
+      done
+      [ -n "$program" ] || exit 1
+      printf '%s' "$FM_TEST_GH_ROLLUP" | "${FM_TEST_JQ:-jq}" -r "$program" || exit 1
+      exit 0
+    fi
+    if [ -n "${FM_TEST_GH_OBSERVATION:-}" ]; then
+      printf '%s\n' "$FM_TEST_GH_OBSERVATION"
+    elif [ "${FM_TEST_GH_STATE:-OPEN}" = MERGED ]; then
+      printf '%s\n' merged
+    fi
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -94,14 +116,41 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
-  # Plain glab, reproducing the real CLI's contract: its field output on stdout
-  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Plain glab, reproducing both of the real CLI's formats: field output by
+  # default and one structured merge-request object under `-F json`.
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+case " $* " in
+  *" -F json "*)
+    if [ "${FM_TEST_GLAB_JSON_MALFORMED:-0}" = 1 ]; then
+      printf 'not-json\n'
+      exit 0
+    fi
+    state=${FM_TEST_GLAB_STATE:-opened}
+    pipeline=${FM_TEST_GLAB_PIPELINE:-}
+    if [ -n "$pipeline" ]; then
+      pipeline_json=$(printf ',"head_pipeline":{"status":"%s","sha":"%s"}' \
+        "$pipeline" "${FM_TEST_GLAB_PIPELINE_SHA:-0123456789abcdef0123456789abcdef01234567}")
+    else
+      pipeline_json=',"head_pipeline":null'
+    fi
+    if [ "${FM_TEST_GLAB_OMIT_STATE:-0}" = 1 ]; then
+      state_json=
+    else
+      state_json=$(printf '"state":"%s",' "$state")
+    fi
+    printf '{%s"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"sha":"%s"%s}\n' \
+      "$state_json" "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}" "$pipeline_json"
+    ;;
+  *)
+    printf 'title:\tfixture merge request\n'
+    [ "${FM_TEST_GLAB_OMIT_STATE:-0}" = 1 ] || printf 'state:\t%s\n' "${FM_TEST_GLAB_STATE:-open}"
+    printf 'author:\tsomeone\n'
+    ;;
+esac
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
   : > "$dir/gh.log"
@@ -256,6 +305,12 @@ run_check_entry() {
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
+}
+
+run_check_observe_entry() {
+  local dir=$1
+  shift
+  run_check_entry "$dir" --observe-pending "$@"
 }
 
 run_merge_entry() {
@@ -663,6 +718,686 @@ run_watcher_bounded() {
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+# The validated PR observer and the status publisher are exercised through the
+# registration and watcher entrypoints, never by matching implementation bytes.
+test_external_check_visible_transitions() {
+  local dir state url out rc count first
+  url=https://github.com/o/r/pull/52
+
+  dir=$(make_case external-check-named)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tMigrationen + Testsuite, Browser smoke' \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "named pending PR registration failed"
+  out=$(cat "$dir/arm.out")
+  assert_contains "$out" "External check running | Migrationen + Testsuite, Browser smoke | $url | since " \
+    "named pending checks were not visible at registration"
+  assert_contains "$out" " | worker finished and healthy" \
+    "named pending check did not include worker health"
+  grep -F "paused: External check running | Migrationen + Testsuite, Browser smoke | $url | since " \
+    "$state/task-a.status" >/dev/null || fail "named pending check was not durable current state"
+
+  # Re-observe the same registration through the existing watcher cadence, so
+  # dedup uses one fixed canonical mtime and never depends on wall-clock minute.
+  add_stop_custom_check "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tMigrationen + Testsuite, Browser smoke' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/repeat.out" 2> "$dir/repeat.err" \
+    || fail "unchanged pending watcher observation failed"
+  count=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$count" -eq 1 ] || fail "unchanged pending check appended $count visible transitions"
+  ack_watcher_cycle "$state" || fail "dedup control wake acknowledgement failed"
+  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
+
+  FM_TEST_GH_OBSERVATION=green run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/green.out" 2> "$dir/green.err" || fail "green continuation watcher failed"
+  grep -qxF "done: PR $url checks green" "$state/task-a.status" \
+    || fail "green checks did not resume the existing ready delivery event"
+  assert_contains "$(cat "$dir/green.out")" "signal:" \
+    "green checks did not surface through the existing actionable status path"
+
+  dir=$(make_case external-check-arm-terminal)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'failed\ttransient red sample' \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/red-arm.out" 2> "$dir/red-arm.err" \
+    || fail "red first observation prevented PR registration"
+  [ ! -e "$state/task-a.status" ] \
+    || fail "red first observation published a durable registration-time failure"
+  FM_TEST_GH_FAIL=1 run_check_observe_entry "$dir" task-a "$url" \
+    > "$dir/unreadable-arm.out" 2> "$dir/unreadable-arm.err" \
+    || fail "unreadable first observation prevented PR registration"
+  [ ! -e "$state/task-a.status" ] \
+    || fail "unreadable first observation published a durable registration-time failure"
+
+  dir=$(make_case external-check-silent-rearm)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" \
+    > "$dir/initial.out" 2> "$dir/initial.err" || fail "initial observed registration failed"
+  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" \
+    > "$dir/rearm.out" 2> "$dir/rearm.err" || fail "silent PR re-arm failed"
+  assert_not_contains "$(cat "$dir/rearm.out")" "External PR checks pending" \
+    "silent re-arm published a fresh pending wait"
+  [ "$(grep -c '^paused: External PR checks pending |' "$state/task-a.status")" -eq 1 ] \
+    || fail "silent re-arm appended another pending event"
+
+  dir=$(make_case external-check-presentation-warning)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=invalid FM_TEST_GH_OBSERVATION=empty \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "optional presentation failure changed successful poll arming into failure"
+  grep -qxF 'armed: state/task-a.check.sh' "$dir/arm.out" \
+    || fail "presentation warning suppressed the successful armed result"
+  assert_contains "$(cat "$dir/arm.err")" "poll armed but external-wait presentation could not be published" \
+    "optional presentation failure was not reported"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "optional presentation failure damaged the armed poll"
+
+  dir=$(make_case external-check-empty-startup)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=empty run_check_observe_entry "$dir" task-a "$url" \
+    > "$dir/arm.out" 2> "$dir/arm.err" || fail "empty startup-rollup registration failed"
+  grep -qF "paused: External PR checks pending | $url |" "$state/task-a.status" \
+    || fail "empty startup rollup was declared green before checks could register"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=0 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/no-checks.out" 2> "$dir/no-checks.err" \
+    || fail "expired empty-rollup grace watcher failed"
+  grep -qxF "done: PR $url no external checks reported" "$state/task-a.status" \
+    || fail "empty rollup stayed pending after its registration-age grace"
+  assert_no_grep "checks green" "$state/task-a.status" \
+    "empty GitHub rollup was mislabeled as green"
+  # A repository that never registers a check keeps reporting an empty rollup.
+  # The settled no-checks result is one-way: it must not re-enter the startup
+  # grace and oscillate back into a wait on every later tick.
+  ack_watcher_cycle "$state" || fail "no-checks wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  # A settled no-checks result produces no further wake, so the cycle needs an
+  # unrelated custom check to end it rather than the PR observation itself.
+  add_stop_custom_check "$dir"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=600 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/no-checks-again.out" 2> "$dir/no-checks-again.err" \
+    || fail "repeated empty-rollup watcher failed: $(cat "$dir/no-checks-again.err")"
+  [ "$(grep -cxF "done: PR $url no external checks reported" "$state/task-a.status")" = 1 ] \
+    || fail "a settled empty rollup republished its no-checks event"
+  [ "$(grep -cF "paused: External PR checks pending | $url |" "$state/task-a.status")" = 1 ] \
+    || fail "a settled empty rollup re-entered the startup grace: $(cat "$state/task-a.status")"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" \
+    = "done: PR $url no external checks reported" ] \
+    || fail "a settled empty rollup oscillated back to a pending wait"
+
+  # An unreadable tick is a gap in reading the same head, not the end of the
+  # empty-rollup startup grace, so the grace keeps both its epoch and its
+  # remaining time and a still-empty rollup inside it stays the same wait.
+  dir=$(make_case external-check-empty-grace-unreadable)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_OBSERVATION=empty \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "empty-grace unreadable fixture did not arm"
+  first=$(fm_external_wait_last_status_line "$state/task-a.status")
+  case "$first" in
+    "paused: External PR checks pending | $url | since "*) ;;
+    *) fail "the empty-rollup startup grace did not publish a wait: $first" ;;
+  esac
+  set +e
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_FAIL=1 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/grace-unreadable.out" 2> "$dir/grace-unreadable.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "the unreadable tick inside the startup grace failed: $(cat "$dir/grace-unreadable.err")"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "a forge error inside the startup grace was not publisher-owned"
+  ack_watcher_cycle "$state" || fail "startup-grace unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/grace-resumed.out" 2> "$dir/grace-resumed.err" \
+    || fail "the empty rollup after an unreadable tick failed: $(cat "$dir/grace-resumed.err")"
+  assert_no_grep "no external checks reported" "$state/task-a.status" \
+    "an unreadable tick ended the empty-rollup startup grace early"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" = "$first" ] \
+    || fail "the resumed startup grace lost its first published start: $(cat "$state/task-a.status")"
+
+  # An empty rollup observed after a same-head non-empty phase is a later
+  # publisher phase, not a fresh startup: it resolves to no-checks directly
+  # rather than opening a second grace window with a new start stamp.
+  dir=$(make_case external-check-empty-after-pending)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "pending-then-empty fixture did not arm"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=600 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/empty-after-pending.out" 2> "$dir/empty-after-pending.err" \
+    || fail "empty-after-pending watcher failed: $(cat "$dir/empty-after-pending.err")"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" \
+    = "done: PR $url no external checks reported" ] \
+    || fail "an empty rollup after a same-head pending phase re-entered the startup grace: $(cat "$state/task-a.status")"
+  assert_no_grep "External PR checks pending | $url |" "$state/task-a.status" \
+    "an empty rollup after a same-head pending phase republished a startup wait"
+
+  dir=$(make_case external-check-unknown)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" \
+    > "$dir/arm.out" 2> "$dir/arm.err" || fail "unknown-name pending registration failed"
+  assert_contains "$(cat "$dir/arm.out")" "External PR checks pending | $url | since " \
+    "unknown-name pending checks invented or omitted a label"
+  assert_not_contains "$(cat "$dir/arm.out")" "External check running |  |" \
+    "unknown-name pending checks rendered an empty invented name"
+
+  dir=$(make_case external-check-pause-vocabulary)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_CLASSIFY_PAUSED_VERB=waiting FM_TEST_GH_OBSERVATION=pending \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "configured pause-vocabulary registration failed"
+  grep -qF "waiting: External PR checks pending | $url |" "$state/task-a.status" \
+    || fail "PR wait did not use the existing configured pause-verb owner"
+  assert_no_grep '^paused:' "$state/task-a.status" \
+    "PR wait hardcoded the default pause verb"
+
+  dir=$(make_case external-check-failure)
+  state="$dir/home/state"
+  # Use a normal pending fixture for the repeated-monitor failure transition.
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "failure transition fixture did not arm"
+  FM_TEST_GH_OBSERVATION=$'failed\tMigrationen + Testsuite' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/failed.out" 2> "$dir/failed.err" \
+    || fail "failed-check watcher transition failed"
+  grep -qxF "failed: PR $url external checks failed | Migrationen + Testsuite" "$state/task-a.status" \
+    || fail "failed check did not become the existing actionable failure event"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "recoverable failed check retired its PR poll"
+  assert_contains "$(cat "$dir/failed.out")" "signal:" \
+    "failed check did not escalate through the existing status path"
+
+  dir=$(make_case external-check-unreadable)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "unreadable transition fixture did not arm"
+  set +e
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/unreadable.out" 2> "$dir/unreadable.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "unreadable-check watcher transition failed: $(cat "$dir/unreadable.err")"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "unreadable terminal check did not become an actionable failure"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "recoverable unreadable status retired its PR poll"
+
+  dir=$(make_case external-check-merged)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tRelease verification' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "merged wait fixture did not arm"
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/transient.out" 2> "$dir/transient.err" \
+    || fail "intervening unreadable transition failed"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "intervening unreadable transition was not publisher-owned"
+  ack_watcher_cycle "$state" || fail "intervening unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/merged.out" 2> "$dir/merged.err" || fail "merged wait watcher failed"
+  grep -qxF "done: PR $url merged" "$state/task-a.status" \
+    || fail "merge did not clear the published external wait through status"
+  assert_poll_absent "$state" task-a
+
+  # Presentation is best effort: a status log it cannot append to must not stop
+  # the merge notification or the identity-bound retirement.
+  dir=$(make_case external-check-merged-presentation-failure)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "merged presentation-failure fixture did not arm"
+  chmod 0444 "$state/task-a.status"
+  FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/merged-fail.out" 2> "$dir/merged-fail.err" \
+    || fail "a failed merged presentation aborted the watcher: $(cat "$dir/merged-fail.err")"
+  assert_contains "$(cat "$dir/merged-fail.out")" "merged" \
+    "a failed presentation suppressed the merged notification"
+  assert_poll_absent "$state" task-a
+  chmod 0644 "$state/task-a.status"
+
+  dir=$(make_case external-check-closed-presentation-failure)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "closed presentation-failure fixture did not arm"
+  chmod 0444 "$state/task-a.status"
+  FM_TEST_GH_OBSERVATION=closed run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/closed-fail.out" 2> "$dir/closed-fail.err" \
+    || fail "a failed closed presentation aborted the watcher: $(cat "$dir/closed-fail.err")"
+  assert_poll_absent "$state" task-a
+  chmod 0644 "$state/task-a.status"
+
+  dir=$(make_case external-check-closed)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "closed wait fixture did not arm"
+  FM_TEST_GH_OBSERVATION=closed run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/closed.out" 2> "$dir/closed.err" || fail "closed wait watcher failed"
+  grep -qxF "failed: PR $url closed before merge" "$state/task-a.status" \
+    || fail "closed PR was mislabeled as an external check failure"
+  assert_poll_absent "$state" task-a
+
+  # A reopened PR that then merges must supersede this publisher's own closure.
+  ack_watcher_cycle "$state" || fail "closure wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent re-arm after reopening failed"
+  FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/reopened-merged.out" 2> "$dir/reopened-merged.err" \
+    || fail "merged watcher after a reopened closure failed"
+  grep -qxF "done: PR $url merged" "$state/task-a.status" \
+    || fail "a merge did not supersede this publisher's closure: $(cat "$state/task-a.status")"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" = "done: PR $url merged" ] \
+    || fail "the merged PR's persistent current state stayed a closure"
+  pass "validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths"
+}
+
+# An unchanged pending observation is one transition for the whole wait: an
+# unrelated worker event in between and a silent re-arm must not republish it,
+# and the published start must not move.
+test_external_check_dedup_survives_worker_events() {
+  local dir state url first paused restarted today
+  url=https://github.com/o/r/pull/61
+  dir=$(make_case external-check-dedup-owned)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent PR arming for the dedup fixture failed"
+  # 2026-03-29 01:30 UTC is 03:30 CEST, a start stamp no later re-arm can produce.
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$state/task-a.pr-poll-registration"
+  add_stop_custom_check "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "first pending observation failed: $(cat "$dir/first.err")"
+  first="paused: External check running | build | $url | since 2026-03-29 03:30 CEST | worker finished and healthy"
+  grep -qxF "$first" "$state/task-a.status" \
+    || fail "the first pending observation did not publish its wait: $(cat "$state/task-a.status")"
+  ack_watcher_cycle "$state" || fail "first pending wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  printf 'working: adjusting review feedback\n' >> "$state/task-a.status"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/second.out" 2> "$dir/second.err" \
+    || fail "unchanged pending observation after a worker event failed"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 1 ] \
+    || fail "an unchanged pending check republished its wait after a worker event ($paused transitions)"
+  [ "$(tail -1 "$state/task-a.status")" = 'working: adjusting review feedback' ] \
+    || fail "an unchanged pending check overwrote the working crew's current state"
+  ack_watcher_cycle "$state" || fail "post-worker-event wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A silent re-arm rewrites the registration, so its mtime is now.
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent re-arm for the dedup fixture failed"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/third.out" 2> "$dir/third.err" \
+    || fail "unchanged pending observation after a silent re-arm failed"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 1 ] \
+    || fail "a silent re-arm republished the unchanged wait ($paused transitions)"
+  grep -qxF "$first" "$state/task-a.status" \
+    || fail "a silent re-arm moved the published wait start"
+  ack_watcher_cycle "$state" || fail "post-re-arm wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A genuinely changed check set is still one new transition, and it keeps the
+  # start the running wait was first published with.
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild, lint' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/fourth.out" 2> "$dir/fourth.err" \
+    || fail "changed pending observation failed"
+  grep -qxF "paused: External check running | build, lint | $url | since 2026-03-29 03:30 CEST | worker finished and healthy" \
+    "$state/task-a.status" || fail "a changed pending check did not publish a truthful transition"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 2 ] || fail "a changed pending check produced $paused transitions"
+  ack_watcher_cycle "$state" || fail "changed pending wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A new pending phase after this publisher's own non-pending state began at
+  # that transition, not at the original arming time.
+  FM_TEST_GH_OBSERVATION=green \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/green.out" 2> "$dir/green.err" \
+    || fail "green continuation failed"
+  grep -qxF "done: PR $url checks green" "$state/task-a.status" \
+    || fail "green did not resume the existing delivery event"
+  ack_watcher_cycle "$state" || fail "green wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/restart.out" 2> "$dir/restart.err" \
+    || fail "restarted pending observation failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  today=$(TZ=Europe/Berlin date '+%Y-%m-%d')
+  case "$restarted" in
+    *'since 2026-03-29 03:30 CEST'*)
+      fail "a restarted pending wait reused the original arming start: $restarted" ;;
+    *" | since $today "*) ;;
+    *) fail "a restarted pending wait did not publish a fresh canonical start: $restarted" ;;
+  esac
+  pass "an unchanged pending wait stays one transition with a stable start across worker events and re-arms"
+}
+
+# A validated forge head, not registration mtime, owns phase continuity.
+# Unreadable and same-head re-arms preserve the start; only a proved new head
+# resets it, while unknown->known binds without resetting the running phase.
+test_external_check_head_bound_phase() {
+  local dir state url first restarted today paused head1 head2 rollup1 rollup2 unknown_rollup
+  local head3 unknown_member empty_rollup
+  url=https://github.com/o/r/pull/63
+  head1=1111111111111111111111111111111111111111
+  head2=2222222222222222222222222222222222222222
+  rollup1=$(printf '{"state":"OPEN","headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":null}]}' "$head1")
+  rollup2=$(printf '{"state":"OPEN","headRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":null}]}' "$head2")
+  unknown_rollup='{"state":"OPEN","headRefOid":"","statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":null}]}'
+  dir=$(make_case external-check-head-phase)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent PR arming for the head-phase fixture failed"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$state/task-a.pr-poll-registration"
+  add_stop_custom_check "$dir"
+  first="paused: External check running | build | $url | since 2026-03-29 03:30 CEST | worker finished and healthy"
+
+  FM_TEST_GH_ROLLUP="$unknown_rollup" FM_TEST_JQ="$REAL_JQ" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p0.out" 2> "$dir/p0.err" \
+    || fail "unknown-head pending observation failed"
+  grep -qxF "$first" "$state/task-a.status" || fail "unknown-head phase did not use its canonical initial start"
+  ack_watcher_cycle "$state" || fail "unknown-head wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GH_ROLLUP="$rollup1" FM_TEST_JQ="$REAL_JQ" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p1.out" 2> "$dir/p1.err" \
+    || fail "unknown-to-known head observation failed"
+  [ "$(grep -c '^paused: External check running |' "$state/task-a.status")" -eq 1 ] \
+    || fail "binding the first known head reset or replayed the running phase"
+  ack_watcher_cycle "$state" || fail "known-head wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/u1.out" 2> "$dir/u1.err" || fail "unreadable observation failed"
+  ack_watcher_cycle "$state" || fail "unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null || fail "same-head silent re-arm failed"
+  FM_TEST_GH_ROLLUP="$rollup1" FM_TEST_JQ="$REAL_JQ" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p2.out" 2> "$dir/p2.err" \
+    || fail "same-head pending after unreadable/re-arm failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  [ "$restarted" = "$first" ] || fail "same-head unreadable/re-arm moved the wait start: $restarted"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 2 ] || fail "pending did not resume once after unreadable ($paused transitions)"
+  ack_watcher_cycle "$state" || fail "same-head resumed wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null || fail "new-head silent re-arm failed"
+  FM_TEST_GH_ROLLUP="$rollup2" FM_TEST_JQ="$REAL_JQ" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p3.out" 2> "$dir/p3.err" \
+    || fail "proved new-head pending observation failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  today=$(TZ=Europe/Berlin date '+%Y-%m-%d')
+  case "$restarted" in
+    *'since 2026-03-29 03:30 CEST'*) fail "proved new head kept the previous phase start: $restarted" ;;
+    *" | since $today "*) ;;
+    *) fail "proved new head did not publish a fresh canonical start: $restarted" ;;
+  esac
+  ack_watcher_cycle "$state" || fail "proved new-head wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A proven different head whose very first observation is unreadable still
+  # owns a startup grace: the head change was proven at that tick, so its phase
+  # epoch starts there instead of being discarded.
+  head3=3333333333333333333333333333333333333333
+  unknown_member=$(printf '{"state":"OPEN","headRefOid":"%s","statusCheckRollup":[{"__typename":"NotAKnownRollupType","name":"x"}]}' "$head3")
+  empty_rollup=$(printf '{"state":"OPEN","headRefOid":"%s","statusCheckRollup":[]}' "$head3")
+  FM_TEST_GH_ROLLUP="$unknown_member" FM_TEST_JQ="$REAL_JQ" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/u2.out" 2> "$dir/u2.err" \
+    || fail "new-head unreadable observation failed: $(cat "$dir/u2.err")"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "an unrecognized rollup member on a proven new head was not publisher-owned"
+  ack_watcher_cycle "$state" || fail "new-head unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_ROLLUP="$empty_rollup" \
+    FM_TEST_JQ="$REAL_JQ" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/e1.out" 2> "$dir/e1.err" \
+    || fail "new-head empty rollup after an unreadable tick failed: $(cat "$dir/e1.err")"
+  assert_no_grep "no external checks reported" "$state/task-a.status" \
+    "a head proven at an unreadable tick lost its empty-rollup startup grace"
+  restarted=$(fm_external_wait_last_status_line "$state/task-a.status")
+  case "$restarted" in
+    "paused: External PR checks pending | $url | since $today "*) ;;
+    *) fail "the new head's startup grace did not publish a truthful wait: $restarted" ;;
+  esac
+  pass "GitHub phase continuity follows validated head identity across unknown, re-arm, unreadable, and head change"
+}
+
+test_gitlab_external_check_head_bound_phase() {
+  local dir state url first restarted today head1 head2
+  url=https://gitlab.example/group/project/-/merge_requests/63
+  head1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  head2=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  dir=$(make_case gitlab-external-check-head-phase)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null || fail "GitLab head-phase arming failed"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$state/task-a.pr-poll-registration"
+  add_stop_custom_check "$dir"
+  first="paused: External check running | pipeline running | $url | since 2026-03-29 03:30 CEST | worker finished and healthy"
+
+  FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=running FM_TEST_GLAB_HEAD=invalid \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p0.out" 2> "$dir/p0.err" \
+    || fail "GitLab unknown-head pending observation failed"
+  grep -qxF "$first" "$state/task-a.status" || fail "GitLab unknown-head phase lost its initial start"
+  ack_watcher_cycle "$state" || fail "GitLab unknown-head wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=running FM_TEST_GLAB_HEAD="$head1" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p1.out" 2> "$dir/p1.err" \
+    || fail "GitLab unknown-to-known head observation failed"
+  [ "$(grep -c '^paused: External check running |' "$state/task-a.status")" -eq 1 ] \
+    || fail "GitLab first known head reset or replayed the running phase"
+  ack_watcher_cycle "$state" || fail "GitLab known-head wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  FM_TEST_GLAB_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/u1.out" 2> "$dir/u1.err" || fail "GitLab unreadable observation failed"
+  ack_watcher_cycle "$state" || fail "GitLab unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null || fail "GitLab same-head silent re-arm failed"
+  FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=running FM_TEST_GLAB_HEAD="$head1" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p2.out" 2> "$dir/p2.err" \
+    || fail "GitLab same-head pending after unreadable/re-arm failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  [ "$restarted" = "$first" ] || fail "GitLab same-head re-arm moved the wait start: $restarted"
+  ack_watcher_cycle "$state" || fail "GitLab same-head resumed wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null || fail "GitLab new-head silent re-arm failed"
+  FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=running FM_TEST_GLAB_HEAD="$head2" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/p3.out" 2> "$dir/p3.err" \
+    || fail "GitLab proved new-head pending observation failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  today=$(TZ=Europe/Berlin date '+%Y-%m-%d')
+  case "$restarted" in
+    *'since 2026-03-29 03:30 CEST'*) fail "GitLab proved new head kept the old start: $restarted" ;;
+    *" | since $today "*) ;;
+    *) fail "GitLab proved new head did not publish a fresh start: $restarted" ;;
+  esac
+  pass "GitLab phase continuity follows validated head identity across unknown, re-arm, unreadable, and head change"
+}
+
+# The GitHub observer is exercised against forge-shaped statusCheckRollup
+# payloads through the real jq the CLI applies, so its classification, name
+# sanitization and name bound are behavior rather than unread source bytes.
+test_github_rollup_classification() {
+  local dir url out
+  dir=$(make_case github-rollup-classification)
+  url=https://github.com/o/r/pull/52
+
+  observe_rollup() {  # <rollup-json>
+    FM_TEST_GH_ROLLUP="$1" FM_TEST_JQ="$REAL_JQ" \
+      FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+      PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+        github "$url" github.com o/r 52
+  }
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[]}')
+  [ "$out" = empty ] || fail "an empty GitHub rollup was not reported as empty, got: $out"
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+    {"__typename":"StatusContext","context":"legacy","state":"SUCCESS"}]}')
+  [ "$out" = green ] || fail "an all-passed GitHub rollup was not green, got: $out"
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","name":"build (ubuntu, node 20)","status":"IN_PROGRESS","conclusion":null}]}')
+  [ "$out" = $'pending\tbuild (ubuntu, node 20)' ] \
+    || fail "a running GitHub check run was not pending with its concrete name, got: $out"
+
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"StatusContext","context":"ci/legacy","state":"PENDING"}]}')
+  [ "$out" = $'pending\tci/legacy' ] \
+    || fail "a pending GitHub status context was not pending with its context, got: $out"
+
+  # A workflow held at an approval gate is waiting, not red.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"deploy approval","status":"COMPLETED","conclusion":"ACTION_REQUIRED"}]}')
+  [ "$out" = $'pending\tdeploy approval' ] \
+    || fail "an approval-gated GitHub check was escalated instead of pending, got: $out"
+
+  # A stale check produced no result for the current ref and stays actionable.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"stale unit","status":"COMPLETED","conclusion":"STALE"}]}')
+  [ "$out" = $'failed\tstale unit' ] \
+    || fail "a stale GitHub check was not reported truthfully as failed, got: $out"
+
+  # Red wins over still-running work, and only the red names are reported.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"still running","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
+    {"__typename":"StatusContext","context":"legacy","state":"ERROR"}]}')
+  [ "$out" = $'failed\tunit, legacy' ] \
+    || fail "GitHub red checks did not take precedence with only their own names, got: $out"
+
+  # Forge-supplied names cannot inject separators or terminal escapes.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"a|b\u001b[31mc","status":"IN_PROGRESS","conclusion":null}]}')
+  case "$out" in
+    *'|'*) fail "a GitHub check name injected the field separator: $out" ;;
+    *$'\033'*) fail "a GitHub check name injected a terminal escape: $out" ;;
+    'pending	'*) ;;
+    *) fail "a hostile GitHub check name did not classify as pending, got: $out" ;;
+  esac
+
+  # Many pending checks are bounded to a readable label.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"c1","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c2","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c3","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c4","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c5","status":"QUEUED","conclusion":null},
+    {"__typename":"CheckRun","name":"c6","status":"QUEUED","conclusion":null}]}')
+  [ "$out" = $'pending\tc1, c2, c3, c4, c5' ] \
+    || fail "pending GitHub check names were not bounded to the first five, got: $out"
+
+  # A member the observer cannot read may never claim green.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"FutureCheckThing","name":"mystery"}]}')
+  [ "$out" = unreadable ] \
+    || fail "an unrecognized rollup member was folded into a readable verdict, got: $out"
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+    {"__typename":"FutureCheckThing","name":"mystery"}]}')
+  [ "$out" = unreadable ] \
+    || fail "an unrecognized rollup member next to a passed check claimed green, got: $out"
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
+    {"__typename":"FutureCheckThing","name":"mystery"}]}')
+  [ "$out" = $'failed\tunit' ] \
+    || fail "an unrecognized rollup member masked a readable red check, got: $out"
+
+  out=$(observe_rollup '{"state":"MERGED","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"IN_PROGRESS","conclusion":null}]}')
+  [ "$out" = merged ] || fail "a merged GitHub PR was not terminal, got: $out"
+  out=$(observe_rollup '{"state":"CLOSED","statusCheckRollup":[]}')
+  [ "$out" = closed ] || fail "a closed GitHub PR was not terminal, got: $out"
+
+  # The same payload reaches durable state as a bounded captain-facing wait
+  # with no raw forge fields.
+  write_task_meta "$dir"
+  FM_TEST_JQ="$REAL_JQ" \
+    FM_TEST_GH_ROLLUP='{"state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","name":"build (ubuntu, node 20)","status":"IN_PROGRESS","conclusion":null}]}' \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "registration against a real GitHub rollup failed: $(cat "$dir/arm.err")"
+  grep -qF "paused: External check running | build (ubuntu, node 20) | $url | since " \
+    "$dir/home/state/task-a.status" \
+    || fail "the observed rollup did not become the durable external wait"
+  assert_no_grep '__typename' "$dir/home/state/task-a.status" \
+    "raw forge payload fields reached durable fleet state"
+  pass "GitHub rollup payloads classify, bound and sanitize their observation through the real CLI parser"
+}
+
+# Forge names are bounded for presentation, and the persisted status event that
+# every jq-based projection re-reads must stay valid UTF-8.
+test_external_check_names_bound_is_utf8_safe() {
+  local dir state url name rollup short_case
+  url=https://github.com/o/r/pull/62
+  dir=$(make_case external-check-utf8-names)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  name=$(awk 'BEGIN{s="";while(length(s)<120)s=s "ü";print s}')
+  rollup=$(printf '{"state":"OPEN","statusCheckRollup":[')
+  for _ in 1 2 3 4 5; do
+    rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"QUEUED\"},"
+  done
+  rollup="${rollup%,}]}"
+  FM_TEST_JQ="$REAL_JQ" FM_TEST_GH_ROLLUP="$rollup" \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "multibyte-named pending registration failed: $(cat "$dir/arm.err")"
+  grep -q '^paused: External check running | ' "$state/task-a.status" \
+    || fail "multibyte pending names did not publish a wait: $(cat "$state/task-a.status")"
+  perl -e 'use Encode; open my $fh, "<:raw", $ARGV[0] or die $!; local $/; my $d = <$fh>;
+           my $t = Encode::decode("UTF-8", $d, Encode::FB_CROAK);
+           my ($names) = $t =~ /^paused: External check running \| (.*?) \| https/m;
+           die "no names segment\n" unless defined $names;
+           die "names segment exceeded its bound: " . length($names) . "\n" if length($names) > 600;' \
+    "$state/task-a.status" \
+    || fail "the published wait was cut mid-UTF-8 sequence or exceeded its name bound"
+  # Below the bound the name is passed through exactly, in a byte-oriented
+  # locale as much as in a character-aware one.
+  short_case=$(make_case external-check-utf8-short)
+  write_task_meta "$short_case"
+  LC_ALL=C FM_TEST_JQ="$REAL_JQ" \
+    FM_TEST_GH_ROLLUP='{"state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","name":"Prüfung café","status":"QUEUED"}]}' \
+    run_check_observe_entry "$short_case" task-a "$url" > "$short_case/arm.out" 2> "$short_case/arm.err" \
+    || fail "non-ASCII pending registration failed: $(cat "$short_case/arm.err")"
+  grep -qF "paused: External check running | Prüfung café | $url | since " \
+    "$short_case/home/state/task-a.status" \
+    || fail "a non-ASCII check name below the bound was altered: $(cat "$short_case/home/state/task-a.status")"
+  pass "bounded multibyte forge check names stay valid UTF-8 in persistent state"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -2804,7 +3539,8 @@ SH
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
+  local dir state out rc url value noglab nojq entry bindir name state_value
+  local skipped_dir skipped_state
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
@@ -2823,7 +3559,7 @@ group/subgroup/project
 
   # Only an exact merged state wakes firstmate. Every other reading, including
   # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  for value in open opened closed locked '' not-a-state MERGED merged-but-not; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
     [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
   done
@@ -2831,6 +3567,125 @@ group/subgroup/project
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
+
+  # The richer observer distinguishes only exact terminal states. Unknown or
+  # absent state fields remain unreadable rather than becoming false closures.
+  out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = closed ] || fail "GitLab observer did not classify exact closed state truthfully"
+  out=$(FM_TEST_GLAB_STATE=not-a-merge-request-state FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = unreadable ] || fail "GitLab observer turned an unknown state into a terminal closure"
+  # `locked` is the transient state GitLab sets while it processes a merge. It
+  # was read successfully, so it classifies through the head pipeline like any
+  # other open merge request instead of becoming an actionable unreadable.
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=running \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = $'pending\tpipeline running' ] \
+    || fail "GitLab observer turned a readable locked merge request into an unreadable status, got: $out"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=success \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = green ] \
+    || fail "GitLab observer did not classify a locked merge request by its head pipeline, got: $out"
+  out=$(FM_TEST_GLAB_OMIT_STATE=1 FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = unreadable ] || fail "GitLab observer turned an absent state into a terminal closure"
+  for state_value in open opened; do
+    out=$(FM_TEST_GLAB_STATE="$state_value" FM_TEST_GLAB_PIPELINE=manual \
+      FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+      PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+        gitlab "$url" gitlab.example group/subgroup/project 7)
+    [ "$out" = $'pending\tpipeline manual' ] \
+      || fail "GitLab observer did not tolerate $state_value or treated manual as terminal"
+  done
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=skipped \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = no-pipeline ] \
+    || fail "GitLab observer did not report a skipped pipeline as not merge-ready, got: $out"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = no-pipeline ] \
+    || fail "GitLab observer invented a pending check or claimed readiness with no pipeline, got: $out"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=success \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = green ] || fail "GitLab observer did not recognize a successful structured pipeline"
+  # A known non-terminal pipeline status that was read successfully is still
+  # resolving; only a genuinely unknown value may be unreadable.
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=canceling \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = $'pending\tpipeline canceling' ] \
+    || fail "GitLab observer turned a readable canceling pipeline into an unreadable status, got: $out"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = $'failed\tpipeline failed' ] \
+    || fail "GitLab observer did not report a failed pipeline as actionable, got: $out"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=not-a-pipeline-status \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = unreadable ] \
+    || fail "GitLab observer classified an unknown pipeline status instead of reporting it unreadable, got: $out"
+
+  # A merge request with no pipeline cannot merge through firstmate's own merge
+  # path, so it is published as actionable and keeps being observed.
+  add_stop_custom_check "$dir"
+  FM_TEST_GLAB_STATE=open run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/no-pipeline.out" 2> "$dir/no-pipeline.err" \
+    || fail "no-pipeline watcher transition failed: $(cat "$dir/no-pipeline.err")"
+  grep -qxF "failed: PR $url no pipeline reported, not merge-ready" "$state/task-a.status" \
+    || fail "an absent GitLab pipeline was presented as delivery readiness: $(cat "$state/task-a.status")"
+  assert_no_grep 'no external checks reported' "$state/task-a.status" \
+    "an absent GitLab pipeline reused the GitHub no-checks wording"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an absent GitLab pipeline retired its poll instead of staying under observation"
+  ack_watcher_cycle "$state" || fail "no-pipeline wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
+
+  # A skipped head pipeline is published with the same publisher-owned red verb
+  # as an absent one, so a later merge of that merge request must supersede it.
+  # This runs in its own fixture so no other publisher-owned event can stand in
+  # for the skipped one when the merge decides what it owns.
+  skipped_dir=$(make_case gitlab-skipped-pipeline-merge)
+  skipped_state="$skipped_dir/home/state"
+  write_poll_meta "$skipped_state" task-a "$url"
+  fm_pr_poll_prepare "$skipped_state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare the skipped-pipeline GitLab poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the skipped-pipeline GitLab poll"
+  add_stop_custom_check "$skipped_dir"
+  FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=skipped \
+    run_watcher_bounded "$skipped_dir/home" "$skipped_dir/fakebin" \
+    > "$skipped_dir/skipped.out" 2> "$skipped_dir/skipped.err" \
+    || fail "skipped-pipeline watcher transition failed: $(cat "$skipped_dir/skipped.err")"
+  [ "$(fm_external_wait_last_status_line "$skipped_state/task-a.status")" \
+    = "failed: PR $url pipeline skipped, not merge-ready" ] \
+    || fail "a skipped GitLab pipeline was not published as not merge-ready: $(cat "$skipped_state/task-a.status")"
+  ack_watcher_cycle "$skipped_state" || fail "skipped-pipeline wake acknowledgement failed"
+  rm -f "$skipped_state/.last-check"
+  FM_TEST_GLAB_STATE=merged run_watcher_bounded "$skipped_dir/home" "$skipped_dir/fakebin" \
+    > "$skipped_dir/skipped-merged.out" 2> "$skipped_dir/skipped-merged.err" \
+    || fail "merged watcher after a skipped pipeline failed: $(cat "$skipped_dir/skipped-merged.err")"
+  [ "$(fm_external_wait_last_status_line "$skipped_state/task-a.status")" = "done: PR $url merged" ] \
+    || fail "a merge did not supersede this publisher's skipped-pipeline failure: $(cat "$skipped_state/task-a.status")"
+  assert_poll_absent "$skipped_state" task-a
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git
@@ -2890,6 +3745,34 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-free search path still resolved jq"
+  write_task_meta "$dir" task-d
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
+    "$PR_CHECK" task-d "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a structured GitLab watch succeeded with jq absent"
+  assert_contains "$out" "requires jq on PATH" \
+    "arming a GitLab watch with jq absent did not report the missing parser"
+  [ ! -e "$state/task-d.check.sh" ] || fail "refused jq-less GitLab arming left a poll armed"
+
   # The merge path addresses the forge the URL names, and never the other one.
   # This fixture's glab answers with the field output the poll reads, so the
   # merge's JSON read cannot be parsed, which must refuse rather than merge on a
@@ -2900,7 +3783,7 @@ EOF
   # and the refusal below is the unreadable state rather than a missing tool.
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  FM_TEST_GLAB_JSON_MALFORMED=1 run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
@@ -2929,6 +3812,10 @@ seed_canonical_poll() {
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+}
+
+fm_external_wait_last_status_line() {  # <status-log>
+  grep -v '^[[:space:]]*$' "$1" | tail -1
 }
 
 add_stop_custom_check() {
@@ -3254,23 +4141,19 @@ test_retirement_crash_recovery() {
 }
 
 test_external_merge_transition_retires_only_terminal_poll() {
-  local dir state before rc label
+  local dir state rc label
   dir=$(make_case external-merge-transition)
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/19
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/19
   add_stop_custom_check "$dir"
-  before=$(poll_artifact_snapshot "$state" task-a)
 
-  for label in open-green open-red closed-unmerged forge-error malformed; do
+  for label in open-green open-red forge-error malformed; do
     rm -f "$state/.last-check"
     set +e
     case "$label" in
       open-green|open-red)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
-        ;;
-      closed-unmerged)
-        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       forge-error)
         FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -3283,7 +4166,8 @@ test_external_merge_transition_retires_only_terminal_poll() {
     set -e
     [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
     case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
-    [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$label retired or invalidated the armed poll"
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
 
@@ -3295,7 +4179,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
   case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
-  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
+  pass "open/red, malformed, and forge errors remain armed until an exact merged transition"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {
@@ -3476,6 +4360,12 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_external_check_visible_transitions
+test_external_check_dedup_survives_worker_events
+test_external_check_head_bound_phase
+test_gitlab_external_check_head_bound_phase
+test_github_rollup_classification
+test_external_check_names_bound_is_utf8_safe
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

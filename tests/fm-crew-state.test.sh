@@ -972,8 +972,86 @@ test_no_run_idle_pane_paused() {
   local out; out=$(run_crew_state "$d" feat-pause)
   assert_contains "$out" "state: paused" "paused log -> paused"
   assert_contains "$out" "source: status-log" "idle pause -> status-log source"
-  assert_contains "$out" "holding for the upstream tool release" "the pause reason is carried in the detail"
-  pass "no run + idle pane on a paused: status reports state: paused with its reason"
+  assert_contains "$out" "External wait | holding for the upstream tool release | since " "the pause uses the shared visible presentation"
+  assert_contains "$out" "worker healthy" "the pause explicitly distinguishes a healthy worker"
+  pass "no run + idle pane on a paused: status reports the visible external wait with its reason"
+}
+
+# Europe/Berlin presentation must follow daylight-saving rules rather than a
+# fixed numeric offset. 2026-03-29 01:30 UTC is after the spring transition and
+# therefore renders as 03:30 CEST (02:xx does not exist locally that day).
+test_worker_pause_uses_berlin_dst() {
+  reset_fakes
+  local d out; d=$(new_case paused-berlin-dst)
+  make_repo_on_branch "$d/wt" fm/feat-pause-dst
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-dst.meta" "window=fm:fm-feat-pause-dst" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: scheduled upstream release window\n' > "$d/state/feat-pause-dst.status"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 "$d/state/feat-pause-dst.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-dst
+  out=$(run_crew_state "$d" feat-pause-dst)
+  assert_contains "$out" "External wait | scheduled upstream release window | since 2026-03-29 03:30 CEST | worker healthy" \
+    "Berlin spring-DST timestamp was not rendered from the canonical status mtime"
+  pass "worker-declared external wait renders Europe/Berlin daylight-saving time"
+}
+
+# A worker authors its own pause reason, so the free part of the visible wait is
+# bounded while the required since-time and health fields stay complete.
+test_worker_pause_bounds_free_reason() {
+  reset_fakes
+  local d out reason detail
+  d=$(new_case paused-verbose)
+  make_repo_on_branch "$d/wt" fm/feat-pause-verbose
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-verbose.meta" "window=fm:fm-feat-pause-verbose" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  reason=$(awk 'BEGIN{s="";while(length(s)<900)s=s "upstream release blocked because ";print s}')
+  printf 'paused: %s\n' "$reason" > "$d/state/feat-pause-verbose.status"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 "$d/state/feat-pause-verbose.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-verbose
+  out=$(run_crew_state "$d" feat-pause-verbose)
+  detail="External wait | ${out#*External wait | }"
+  assert_contains "$detail" "External wait | upstream release blocked because " \
+    "the bounded wait lost its worker-declared reason"
+  assert_contains "$detail" "| since 2026-03-29 03:30 CEST | worker healthy" \
+    "bounding the free reason truncated the required since-time or health fields"
+  [ "${#detail}" -le 320 ] \
+    || fail "a verbose worker reason was presented unbounded (${#detail} characters)"
+  pass "a verbose worker-declared reason is bounded while required wait fields stay complete"
+}
+
+# A worker can copy the direct-PR wait label out of its brief. Only a
+# structurally complete publisher-written wait may pass through unbounded;
+# imitated prose stays bounded and is presented as the worker's own wait.
+test_worker_pause_bounds_imitated_pr_label() {
+  reset_fakes
+  local d out detail junk
+  d=$(new_case paused-imitated-label)
+  make_repo_on_branch "$d/wt" fm/feat-pause-imitated
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-imitated.meta" "window=fm:fm-feat-pause-imitated" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  junk=$(awk 'BEGIN{s="";while(length(s)<900)s=s "waiting on nothing in particular ";print s}')
+  printf 'paused: External check running | %s\n' "$junk" > "$d/state/feat-pause-imitated.status"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$d/state/feat-pause-imitated.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-imitated
+  out=$(run_crew_state "$d" feat-pause-imitated)
+  assert_contains "$out" "state: paused" "an imitated wait label lost the declared pause state"
+  detail="External wait | ${out#*External wait | }"
+  assert_contains "$detail" "External wait | External check running | waiting on nothing in particular" \
+    "imitated publisher prose was not presented as the worker's own bounded wait"
+  assert_contains "$detail" "| since 2026-03-29 03:30 CEST | worker healthy" \
+    "an imitated wait label was presented without the canonical start time and worker health"
+  [ "${#detail}" -le 320 ] \
+    || fail "an imitated publisher label bypassed the worker-reason bound (${#detail} characters)"
+  pass "an imitated PR wait label is bounded and labelled as a worker-declared wait"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
@@ -1441,6 +1519,9 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
+test_worker_pause_uses_berlin_dst
+test_worker_pause_bounds_free_reason
+test_worker_pause_bounds_imitated_pr_label
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log

@@ -799,8 +799,38 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_external_wait_detail_is_visible_in_fleet_view() {
+  local home fakebin out view
+  home=$(make_home visible-external-wait)
+  mkdir -p "$home/projects/waiting"
+  fm_write_meta "$home/state/waiting.meta" \
+    "window=firstmate:fm-waiting" \
+    "worktree=$home/projects/waiting" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=direct-PR"
+  record_claude_idle "$home/state" waiting
+  printf 'paused: External check running | Migrationen + Testsuite | https://github.com/o/r/pull/52 | since 2026-08-28 12:00 CEST | worker finished and healthy\n' \
+    > "$home/state/waiting.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "waiting")
+    | .current_state.state == "paused"
+      and (.current_state.detail | contains("External check running | Migrationen + Testsuite"))
+      and (.current_state.detail | contains("https://github.com/o/r/pull/52"))
+      and (.current_state.detail | endswith("worker finished and healthy"))
+  ' >/dev/null || fail "snapshot did not retain the persistent external-wait detail: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" 'paused / status-log - External check running \| Migrationen + Testsuite \| https://github.com/o/r/pull/52' \
+    "fleet view hid the external-wait reason behind a paused/idle state"
+  pass "fleet snapshot and human view retain the current external-wait detail"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_external_wait_detail_is_visible_in_fleet_view
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

@@ -313,6 +313,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def in_flight_detail($declared_wait):
+    tostring | gsub("\\s+"; " ")
+    | if $declared_wait
+         and (startswith("External check running | ")
+              or startswith("External PR checks pending | ")
+              or startswith("External wait | "))
+      then trunc(1200) else trunc(90) end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -349,9 +356,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold"
             and .deferred_marker != true)]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
+       | (if .current.state == "captain_decision" then $backlog_holds else (.holds // []) end) as $view_holds
        | . + {
            bearings_captain_holds:$captain_holds,
-           bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
+           bearings_holds:$view_holds,
+           bearings_external_wait_holds:[$view_holds[] | select((.external_wait_detail | type) == "string")],
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
@@ -368,14 +377,32 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        else empty end ]
      + [ $secondmate_views[]
        | {id,state:.bearings_state,
-          doing:((if .bearings_state == "active_child_work" then
-                    ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
-                  elif .bearings_state == "captain_decision" then
-                    ([.bearings_captain_holds[] | .summary] | join("; "))
-                  elif .bearings_state == "externally_held" then
-                    ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
-                  elif .bearings_state == "no_active_work" then "No active child work"
-                  else (.current.reason // "Current home state unavailable") end) | trunc(120)),
+          doing:(if .bearings_state == "externally_held"
+                    and (.bearings_external_wait_holds | length) > 0 then
+                   ((.bearings_external_wait_holds | length) as $waits
+                    | ([ .bearings_holds[]?
+                         | select((.external_wait_detail | type) != "string") ]) as $plain_holds
+                    | ($plain_holds | length) as $plain
+                    | [ (.bearings_external_wait_holds[:3][] | .id + ": " + .external_wait_detail),
+                        (if $waits > 3 then
+                           "+" + (($waits - 3) | tostring) + " more external waits"
+                         else empty end),
+                        ($plain_holds[:3][]
+                         | .id + ": " + ((.reason // "held") | trunc(120))),
+                        (if $plain > 3 then
+                           "+" + (($plain - 3) | tostring) + " more holds"
+                         else empty end) ]
+                    | join("; "))
+                 else
+                   ((if .bearings_state == "active_child_work" then
+                       ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
+                     elif .bearings_state == "captain_decision" then
+                       ([.bearings_captain_holds[] | .summary] | join("; "))
+                     elif .bearings_state == "externally_held" then
+                       ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
+                     elif .bearings_state == "no_active_work" then "No active child work"
+                     else (.current.reason // "Current home state unavailable") end) | trunc(120))
+                 end),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
@@ -383,10 +410,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | ((.current_state.state == "paused")
+          and (.current_state.source == "status-log")) as $declared_wait
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end)
+                | in_flight_detail($declared_wait))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
