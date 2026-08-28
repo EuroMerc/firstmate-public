@@ -3,11 +3,13 @@
 # Its legacy --validated and sidecar forms emit exactly one `merged` line for a
 # merged PR or MR and stay silent otherwise, including on every error.
 # The watcher uses --observe-validated with the same validated identity to emit
-# one structural observation: merged, closed, green, empty, none, unreadable,
-# or pending/failed plus sanitized concrete check names after one tab when the
-# forge supplies them. `empty` is a GitHub rollup whose startup grace is decided
-# from the existing registration timestamp by bin/fm-external-wait-lib.sh;
-# `none` is a GitLab response that definitively has no running pipeline. A
+# one structural observation: merged, closed, green, empty, no-pipeline,
+# unreadable, or pending/failed plus sanitized concrete check names after one
+# tab when the forge supplies them. `empty` is a GitHub rollup whose startup
+# grace is decided from the existing registration timestamp by
+# bin/fm-external-wait-lib.sh; `no-pipeline` is a GitLab response with no head
+# pipeline, which firstmate's own merge path refuses, so it is reported as an
+# actionable not-merge-ready state rather than delivery readiness. A
 # rollup member of an unrecognized type can never claim green: it reports
 # unreadable unless a readable member is already red or still running.
 # It never waits or loops; bin/fm-watch.sh owns cadence and the shared external-
@@ -195,7 +197,7 @@ FIELDS
       success|passed) printf '%s\n' green ;;
       failed|canceled|cancelled) printf 'failed\t%s\n' "pipeline $pipeline" ;;
       created|preparing|pending|running|waiting_for_resource|scheduled|manual|canceling|cancelling) printf 'pending\t%s\n' "pipeline $pipeline" ;;
-      ''|skipped) printf '%s\n' none ;;
+      ''|skipped) printf '%s\n' no-pipeline ;;
       *) printf '%s\n' unreadable ;;
     esac
     ;;

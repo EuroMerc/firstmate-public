@@ -1233,7 +1233,7 @@ while :; do
       fi
       if [ "$is_pr_poll" -eq 1 ]; then
         case "$out" in
-          pending|pending$'\t'*|empty|none|green|failed|failed$'\t'*|unreadable)
+          pending|pending$'\t'*|empty|none|no-pipeline|green|failed|failed$'\t'*|unreadable)
             if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
               "$STATE/$id.pr-poll-registration" "$out"; then
               reason="check: PR external-wait presentation failed for $id"
@@ -1245,12 +1245,13 @@ while :; do
             continue
             ;;
           closed)
+            # Presentation is a best-effort layer over an already-published
+            # poll, so a failure here never preempts closure or retirement.
             if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
               "$STATE/$id.pr-poll-registration" closed; then
-              reason="check: PR external-wait presentation failed for $id"
-              fm_wake_append check "$c" "$reason" || exit 1
-              touch "$STATE/.last-check"
-              wake "$reason"
+              triage_log "PR external-wait presentation failed for $id: closed"
+              fm_wake_append check "$c" "check: PR closed before merge for $id could not be presented" \
+                || triage_log "closed presentation row could not be queued for $id"
             fi
             retire_terminal_pr_poll "$id" closed
             touch "$STATE/.last-check"
@@ -1259,13 +1260,9 @@ while :; do
           merged)
             # Clear a currently published wait before the existing merge wake
             # and poll-retirement path removes its canonical registration.
-            if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
-              "$STATE/$id.pr-poll-registration" merged; then
-              reason="check: PR external-wait presentation failed for $id"
-              fm_wake_append check "$c" "$reason" || exit 1
-              touch "$STATE/.last-check"
-              wake "$reason"
-            fi
+            fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" merged \
+              || triage_log "PR external-wait presentation failed for $id: merged"
             ;;
         esac
       fi

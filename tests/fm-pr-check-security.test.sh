@@ -885,6 +885,36 @@ test_external_check_visible_transitions() {
     || fail "merge did not clear the published external wait through status"
   assert_poll_absent "$state" task-a
 
+  # Presentation is best effort: a status log it cannot append to must not stop
+  # the merge notification or the identity-bound retirement.
+  dir=$(make_case external-check-merged-presentation-failure)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "merged presentation-failure fixture did not arm"
+  chmod 0444 "$state/task-a.status"
+  FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/merged-fail.out" 2> "$dir/merged-fail.err" \
+    || fail "a failed merged presentation aborted the watcher: $(cat "$dir/merged-fail.err")"
+  assert_contains "$(cat "$dir/merged-fail.out")" "merged" \
+    "a failed presentation suppressed the merged notification"
+  assert_poll_absent "$state" task-a
+  chmod 0644 "$state/task-a.status"
+
+  dir=$(make_case external-check-closed-presentation-failure)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "closed presentation-failure fixture did not arm"
+  chmod 0444 "$state/task-a.status"
+  FM_TEST_GH_OBSERVATION=closed run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/closed-fail.out" 2> "$dir/closed-fail.err" \
+    || fail "a failed closed presentation aborted the watcher: $(cat "$dir/closed-fail.err")"
+  assert_poll_absent "$state" task-a
+  chmod 0644 "$state/task-a.status"
+
   dir=$(make_case external-check-closed)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -902,7 +932,7 @@ test_external_check_visible_transitions() {
 # unrelated worker event in between and a silent re-arm must not republish it,
 # and the published start must not move.
 test_external_check_dedup_survives_worker_events() {
-  local dir state url first paused
+  local dir state url first paused restarted today
   url=https://github.com/o/r/pull/61
   dir=$(make_case external-check-dedup-owned)
   state="$dir/home/state"
@@ -957,6 +987,29 @@ test_external_check_dedup_survives_worker_events() {
     "$state/task-a.status" || fail "a changed pending check did not publish a truthful transition"
   paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
   [ "$paused" -eq 2 ] || fail "a changed pending check produced $paused transitions"
+  ack_watcher_cycle "$state" || fail "changed pending wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A new pending phase after this publisher's own non-pending state began at
+  # that transition, not at the original arming time.
+  FM_TEST_GH_OBSERVATION=green \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/green.out" 2> "$dir/green.err" \
+    || fail "green continuation failed"
+  grep -qxF "done: PR $url checks green" "$state/task-a.status" \
+    || fail "green did not resume the existing delivery event"
+  ack_watcher_cycle "$state" || fail "green wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/restart.out" 2> "$dir/restart.err" \
+    || fail "restarted pending observation failed"
+  restarted=$(grep '^paused: External check running |' "$state/task-a.status" | tail -1)
+  today=$(TZ=Europe/Berlin date '+%Y-%m-%d')
+  case "$restarted" in
+    *'since 2026-03-29 03:30 CEST'*)
+      fail "a restarted pending wait reused the original arming start: $restarted" ;;
+    *" | since $today "*) ;;
+    *) fail "a restarted pending wait did not publish a fresh canonical start: $restarted" ;;
+  esac
   pass "an unchanged pending wait stays one transition with a stable start across worker events and re-arms"
 }
 
@@ -3305,11 +3358,13 @@ group/subgroup/project
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
-  [ "$out" = none ] || fail "GitLab observer did not treat a skipped pipeline as no running check"
+  [ "$out" = no-pipeline ] \
+    || fail "GitLab observer did not report a skipped pipeline as not merge-ready, got: $out"
   out=$(FM_TEST_GLAB_STATE=open FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
-  [ "$out" = none ] || fail "GitLab observer invented a pending check when no pipeline was configured"
+  [ "$out" = no-pipeline ] \
+    || fail "GitLab observer invented a pending check or claimed readiness with no pipeline, got: $out"
   out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=success \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
@@ -3335,6 +3390,21 @@ group/subgroup/project
       gitlab "$url" gitlab.example group/subgroup/project 7)
   [ "$out" = unreadable ] \
     || fail "GitLab observer classified an unknown pipeline status instead of reporting it unreadable, got: $out"
+
+  # A merge request with no pipeline cannot merge through firstmate's own merge
+  # path, so it is published as actionable and keeps being observed.
+  add_stop_custom_check "$dir"
+  FM_TEST_GLAB_STATE=open run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/no-pipeline.out" 2> "$dir/no-pipeline.err" \
+    || fail "no-pipeline watcher transition failed: $(cat "$dir/no-pipeline.err")"
+  grep -qxF "failed: PR $url no pipeline reported, not merge-ready" "$state/task-a.status" \
+    || fail "an absent GitLab pipeline was presented as delivery readiness: $(cat "$state/task-a.status")"
+  assert_no_grep 'no external checks reported' "$state/task-a.status" \
+    "an absent GitLab pipeline reused the GitHub no-checks wording"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an absent GitLab pipeline retired its poll instead of staying under observation"
+  ack_watcher_cycle "$state" || fail "no-pipeline wake acknowledgement failed"
+  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git

@@ -55,6 +55,7 @@ First, plain `glab` has no field selector.
 The legacy merged-only check therefore retains the field-output path below: only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 The richer external-wait observer uses the same command with `-F json` and the bootstrap-required `jq` to select only merge-request state and head-pipeline status in memory; raw JSON is never persisted or copied into fleet state.
 Arming a GitLab watch now refuses when either `glab` or `jq` is absent, rather than publishing a watcher that cannot make its structured observation.
+A skipped or absent head pipeline is reported as an actionable not-merge-ready observation rather than delivery readiness, because the merge path below refuses exactly that merge request; the watch keeps observing it, since a pipeline can still appear.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:

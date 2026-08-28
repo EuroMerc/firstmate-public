@@ -881,7 +881,7 @@ EOF
 }
 
 test_external_wait_detail_stays_complete_without_unbounding_other_rows() {
-  local home mate fakebin json wait_detail secondmate_wait long_working long_hold
+  local home mate fakebin json wait_detail secondmate_wait long_working long_hold extra
   home=$(make_home external-wait-detail); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
   long_working='ordinary working detail that is deliberately much longer than ninety characters because bearings should still bound unrelated task prose rather than globally removing its cap'
@@ -946,6 +946,33 @@ EOF
     | ($doing | contains($mate_wait))
       and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
   ' >/dev/null || fail "a typed secondmate wait hid an unrelated hold from bearings: $json"
+
+  # More concurrent waits than one row may render in full: the first three stay
+  # complete, the remainder is counted, and unrelated holds stay visible.
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    for extra in 2 3 4; do
+      printf -- '- [ ] mate-w%s - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$extra"
+    done
+    printf -- '- [ ] mate-b - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for extra in 2 3 4; do
+    fm_write_meta "$mate/state/mate-w$extra.meta" \
+      "window=firstmate:fm-mate-w$extra" "worktree=$mate/projects/mate" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "mate-w$extra" idle
+    printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate-w$extra.status"
+  done
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg mate_wait "mate: $secondmate_wait" '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | contains($mate_wait))
+      and ($doing | contains("+1 more external waits"))
+      and (($doing | contains("mate-w4: ")) | not)
+      and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
+  ' >/dev/null || fail "many secondmate waits were neither bounded nor counted: $json"
   pass "bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows"
 }
 

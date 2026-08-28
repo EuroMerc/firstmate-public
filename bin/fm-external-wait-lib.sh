@@ -21,7 +21,8 @@
 #   Accept one observation from fm-pr-poll.sh --observe-validated:
 #     pending<TAB><optional comma-separated check names>
 #     empty (GitHub reported no checks; registration-age grace decides pending)
-#     none (GitLab definitively has no running pipeline)
+#     none (GitHub reported no checks once the startup grace expired)
+#     no-pipeline (GitLab has no head pipeline, so it is not merge-ready)
 #     green
 #     merged
 #     closed
@@ -212,7 +213,8 @@ fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url>
       "done: PR $url no external checks reported"|\
       "failed: PR $url closed before merge"|\
       "failed: PR $url external checks failed"|"failed: PR $url external checks failed | "*|\
-      "failed: PR $url external check status unreadable")
+      "failed: PR $url external check status unreadable"|\
+      "failed: PR $url no pipeline reported, not merge-ready")
         match=$line
         ;;
     esac
@@ -229,7 +231,8 @@ fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
       "$pause_verb: External check running | "*|"$pause_verb: External PR checks pending | "*)
         case "$line" in *" | $url | "*) return 0 ;; esac
         ;;
-      "failed: PR $url external checks failed"*|"failed: PR $url external check status unreadable")
+      "failed: PR $url external checks failed"*|"failed: PR $url external check status unreadable"|\
+      "failed: PR $url no pipeline reported, not merge-ready")
         return 0
         ;;
     esac
@@ -274,6 +277,11 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
         # A still-running wait keeps the start it was first published with, so
         # a silent re-arm cannot move it.
         since=$owned_since
+      elif [ -n "$owned_last" ]; then
+        # A pending phase that follows one of this publisher's non-pending
+        # states began at this transition, not at the older arming time.
+        now=$(date +%s) || return 1
+        since=$(fm_external_wait_berlin_time "$now") || return 1
       else
         epoch=$(fm_external_wait_file_mtime "$registration") || return 1
         since=$(fm_external_wait_berlin_time "$epoch") || return 1
@@ -288,6 +296,10 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
     none)
       detail="PR $url no external checks reported"
       event="done: $detail"
+      ;;
+    no-pipeline)
+      detail="PR $url no pipeline reported, not merge-ready"
+      event="failed: $detail"
       ;;
     green)
       detail="PR $url checks green"
