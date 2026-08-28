@@ -3,8 +3,11 @@
 # Its legacy --validated and sidecar forms emit exactly one `merged` line for a
 # merged PR or MR and stay silent otherwise, including on every error.
 # The watcher uses --observe-validated with the same validated identity to emit
-# one structural observation: merged, closed, green, unreadable, or pending/failed plus
-# sanitized concrete check names after one tab when the forge supplies them.
+# one structural observation: merged, closed, green, empty, none, unreadable,
+# or pending/failed plus sanitized concrete check names after one tab when the
+# forge supplies them. `empty` is a GitHub rollup whose startup grace is decided
+# from the existing registration timestamp by bin/fm-external-wait-lib.sh;
+# `none` is a GitLab response that definitively has no running pipeline.
 # It never waits or loops; bin/fm-watch.sh owns cadence and the shared external-
 # wait presentation owner deduplicates unchanged observations.
 # The provider-tagged identity is data in the sidecar and is never interpolated
@@ -98,11 +101,12 @@ case "$provider" in
       elif $pr == "CLOSED" then "closed"
       elif any($checks[]; .failed) then "failed\t" + names("failed")
       elif any($checks[]; .pending) then "pending\t" + names("pending")
+      elif ($checks | length) == 0 then "empty"
       else "green" end
     ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
     case "$observation" in
       '') ;;
-      merged|closed|green|unreadable|pending|pending$'\t'*|failed|failed$'\t'*) printf '%s\n' "$observation" ;;
+      merged|closed|green|empty|unreadable|pending|pending$'\t'*|failed|failed$'\t'*) printf '%s\n' "$observation" ;;
       *) printf '%s\n' unreadable ;;
     esac
     ;;
@@ -138,30 +142,55 @@ case "$provider" in
     # URL passed to -R, so it never falls through to a configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || {
-      [ "$observe" -eq 0 ] || printf '%s\n' unreadable
-      exit 0
-    }
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    if [ "$state" = merged ]; then
-      printf '%s\n' merged
+    if [ "$observe" -eq 0 ]; then
+      # The legacy merged-only poll keeps its established text contract: only
+      # exact `merged` wakes, while changed or unreadable output stays silent.
+      raw=$(GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+      [ "$state" = merged ] && printf '%s\n' merged
       exit 0
     fi
-    [ "$observe" -eq 1 ] || exit 0
+
+    # The richer observation reads state and head-pipeline status from glab's
+    # existing structured merge-request response. jq emits only two bounded
+    # named scalars; raw forge JSON never reaches fleet state or disk.
+    json=$(GITLAB_HOST="$host" glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) \
+      || { printf '%s\n' unreadable; exit 0; }
+    fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "pipeline=" + ((.head_pipeline.status // "") | tostring)
+      else error("merge request payload is not an object") end
+    ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }
+    total=0
+    named=0
+    state=
+    pipeline=
+    while IFS= read -r field; do
+      total=$((total + 1))
+      case "$field" in
+        state=*) state=${field#state=} ;;
+        pipeline=*) pipeline=${field#pipeline=} ;;
+        *) continue ;;
+      esac
+      named=$((named + 1))
+    done <<FIELDS
+$fields
+FIELDS
+    [ "$total" -eq 2 ] && [ "$named" -eq 2 ] \
+      || { printf '%s\n' unreadable; exit 0; }
     case "$state" in
-      opened) ;;
+      merged) printf '%s\n' merged; exit 0 ;;
       closed) printf '%s\n' closed; exit 0 ;;
+      open|opened) ;;
       *) printf '%s\n' unreadable; exit 0 ;;
     esac
-    pipeline=$(printf '%s\n' "$raw" | sed -n 's/^pipeline:[[:space:]]*//p' | head -1)
     case "$pipeline" in
       success|passed) printf '%s\n' green ;;
-      failed|canceled|cancelled|skipped|manual) printf 'failed\t%s\n' "pipeline $pipeline" ;;
-      *) printf '%s\n' pending ;;
+      failed|canceled|cancelled) printf 'failed\t%s\n' "pipeline $pipeline" ;;
+      created|preparing|pending|running|waiting_for_resource|scheduled|manual) printf 'pending\t%s\n' "pipeline $pipeline" ;;
+      ''|skipped) printf '%s\n' none ;;
+      *) printf '%s\n' unreadable ;;
     esac
     ;;
   *) exit 0 ;;

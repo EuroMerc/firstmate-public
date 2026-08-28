@@ -102,17 +102,41 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
-  # Plain glab, reproducing the real CLI's contract: its field output on stdout
-  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Plain glab, reproducing both of the real CLI's formats: field output by
+  # default and one structured merge-request object under `-F json`.
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\n'
-[ "${FM_TEST_GLAB_OMIT_STATE:-0}" = 1 ] || printf 'state:\t%s\n' "${FM_TEST_GLAB_STATE:-opened}"
-[ -z "${FM_TEST_GLAB_PIPELINE:-}" ] || printf 'pipeline:\t%s\n' "$FM_TEST_GLAB_PIPELINE"
-printf 'author:\tsomeone\n'
+case " $* " in
+  *" -F json "*)
+    if [ "${FM_TEST_GLAB_JSON_MALFORMED:-0}" = 1 ]; then
+      printf 'not-json\n'
+      exit 0
+    fi
+    state=${FM_TEST_GLAB_STATE:-opened}
+    pipeline=${FM_TEST_GLAB_PIPELINE:-}
+    if [ -n "$pipeline" ]; then
+      pipeline_json=$(printf ',"head_pipeline":{"status":"%s","sha":"%s"}' \
+        "$pipeline" "${FM_TEST_GLAB_PIPELINE_SHA:-0123456789abcdef0123456789abcdef01234567}")
+    else
+      pipeline_json=',"head_pipeline":null'
+    fi
+    if [ "${FM_TEST_GLAB_OMIT_STATE:-0}" = 1 ]; then
+      state_json=
+    else
+      state_json=$(printf '"state":"%s",' "$state")
+    fi
+    printf '{%s"detailed_merge_status":"mergeable","has_conflicts":false,"blocking_discussions_resolved":true,"sha":"0123456789abcdef0123456789abcdef01234567"%s}\n' \
+      "$state_json" "$pipeline_json"
+    ;;
+  *)
+    printf 'title:\tfixture merge request\n'
+    [ "${FM_TEST_GLAB_OMIT_STATE:-0}" = 1 ] || printf 'state:\t%s\n' "${FM_TEST_GLAB_STATE:-open}"
+    printf 'author:\tsomeone\n'
+    ;;
+esac
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
   : > "$dir/gh.log"
@@ -726,6 +750,22 @@ test_external_check_visible_transitions() {
   [ ! -e "$state/task-a.status" ] \
     || fail "unreadable first observation published a durable registration-time failure"
 
+  dir=$(make_case external-check-empty-startup)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=empty run_check_entry "$dir" task-a "$url" \
+    > "$dir/arm.out" 2> "$dir/arm.err" || fail "empty startup-rollup registration failed"
+  grep -qF "paused: External PR checks pending | $url |" "$state/task-a.status" \
+    || fail "empty startup rollup was declared green before checks could register"
+  perl -e '$t=time-300; utime $t,$t,$ARGV[0] or die $!' "$state/task-a.pr-poll-registration"
+  FM_TEST_GH_OBSERVATION=empty run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/no-checks.out" 2> "$dir/no-checks.err" \
+    || fail "expired empty-rollup grace watcher failed"
+  grep -qxF "done: PR $url no external checks reported" "$state/task-a.status" \
+    || fail "empty rollup stayed pending after its registration-age grace"
+  assert_no_grep "checks green" "$state/task-a.status" \
+    "empty GitHub rollup was mislabeled as green"
+
   dir=$(make_case external-check-unknown)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -758,6 +798,8 @@ test_external_check_visible_transitions() {
     || fail "failed-check watcher transition failed"
   grep -qxF "failed: PR $url external checks failed | Migrationen + Testsuite" "$state/task-a.status" \
     || fail "failed check did not become the existing actionable failure event"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "recoverable failed check retired its PR poll"
   assert_contains "$(cat "$dir/failed.out")" "signal:" \
     "failed check did not escalate through the existing status path"
 
@@ -774,6 +816,8 @@ test_external_check_visible_transitions() {
   [ "$rc" -eq 0 ] || fail "unreadable-check watcher transition failed: $(cat "$dir/unreadable.err")"
   grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
     || fail "unreadable terminal check did not become an actionable failure"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "recoverable unreadable status retired its PR poll"
 
   dir=$(make_case external-check-merged)
   state="$dir/home/state"
@@ -781,6 +825,13 @@ test_external_check_visible_transitions() {
   FM_TEST_GH_OBSERVATION=$'pending\tRelease verification' \
     run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
     || fail "merged wait fixture did not arm"
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/transient.out" 2> "$dir/transient.err" \
+    || fail "intervening unreadable transition failed"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "intervening unreadable transition was not publisher-owned"
+  ack_watcher_cycle "$state" || fail "intervening unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
   FM_TEST_GH_OBSERVATION=merged run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/merged.out" 2> "$dir/merged.err" || fail "merged wait watcher failed"
   grep -qxF "done: PR $url merged" "$state/task-a.status" \
@@ -2938,7 +2989,7 @@ SH
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
+  local dir state out rc url value noglab nojq entry bindir name state_value
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
@@ -2957,7 +3008,7 @@ group/subgroup/project
 
   # Only an exact merged state wakes firstmate. Every other reading, including
   # an unreadable merge request and a changed output format, stays silent.
-  for value in opened closed locked '' not-a-state MERGED merged-but-not; do
+  for value in open opened closed locked '' not-a-state MERGED merged-but-not; do
     out=$(FM_TEST_GLAB_STATE="$value" run_poll "$dir")
     [ -z "$out" ] || fail "GitLab poll emitted for a non-merged state"
   done
@@ -2980,6 +3031,28 @@ group/subgroup/project
     PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
       gitlab "$url" gitlab.example group/subgroup/project 7)
   [ "$out" = unreadable ] || fail "GitLab observer turned an absent state into a terminal closure"
+  for state_value in open opened; do
+    out=$(FM_TEST_GLAB_STATE="$state_value" FM_TEST_GLAB_PIPELINE=manual \
+      FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+      PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+        gitlab "$url" gitlab.example group/subgroup/project 7)
+    [ "$out" = $'pending\tpipeline manual' ] \
+      || fail "GitLab observer did not tolerate $state_value or treated manual as terminal"
+  done
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=skipped \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = none ] || fail "GitLab observer did not treat a skipped pipeline as no running check"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = none ] || fail "GitLab observer invented a pending check when no pipeline was configured"
+  out=$(FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=success \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$POLL" --observe-validated \
+      gitlab "$url" gitlab.example group/subgroup/project 7)
+  [ "$out" = green ] || fail "GitLab observer did not recognize a successful structured pipeline"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git
@@ -3039,6 +3112,34 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-free search path still resolved jq"
+  write_task_meta "$dir" task-d
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
+    "$PR_CHECK" task-d "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a structured GitLab watch succeeded with jq absent"
+  assert_contains "$out" "requires jq on PATH" \
+    "arming a GitLab watch with jq absent did not report the missing parser"
+  [ ! -e "$state/task-d.check.sh" ] || fail "refused jq-less GitLab arming left a poll armed"
+
   # The merge path addresses the forge the URL names, and never the other one.
   # This fixture's glab answers with the field output the poll reads, so the
   # merge's JSON read cannot be parsed, which must refuse rather than merge on a
@@ -3049,7 +3150,7 @@ EOF
   # and the refusal below is the unreadable state rather than a missing tool.
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  FM_TEST_GLAB_JSON_MALFORMED=1 run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
@@ -3411,15 +3512,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
   add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
 
-  for label in open-green open-red closed-unmerged forge-error malformed; do
+  for label in open-green open-red forge-error malformed; do
     rm -f "$state/.last-check"
     set +e
     case "$label" in
       open-green|open-red)
         FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
-        ;;
-      closed-unmerged)
-        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
         ;;
       forge-error)
         FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
@@ -3444,7 +3542,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
   [ "$rc" -eq 0 ] || fail "external merged transition failed: $(cat "$dir/merged.err")"
   case "$(cat "$dir/merged.out")" in check:*task-a.check.sh:*merged) ;; *) fail "external merge did not preserve its notification" ;; esac
   assert_poll_absent "$state" task-a
-  pass "open/red, closed-unmerged, malformed, and forge errors remain armed until an exact merged transition"
+  pass "open/red, malformed, and forge errors remain armed until an exact merged transition"
 }
 
 test_retirement_refuses_replacement_and_nonterminal_results() {

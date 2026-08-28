@@ -39,7 +39,7 @@ ok - validated PR checks present named/unknown waits once, then green, merge, cl
 fm-doc-audience-check: ok surfaces=74 local_links=283
 ```
 
-The PR behavior regression covers a named pending check, a pending state without names, unchanged-wait deduplication, pending-only registration, green continuation, merge clearing, truthful closure, named failure escalation, unreadable status escalation, unknown GitLab state handling, and the full canonical URL without retaining raw forge output.
+The PR behavior regression covers a named pending check, a pending state without names, unchanged-wait deduplication, registration-age handling for an initially empty GitHub rollup, green continuation, merge clearing after an intervening recoverable failure, truthful closure and poll retirement, named failure escalation with continued monitoring, unreadable status escalation, structured GitLab `open`/`opened` and pipeline handling, and the full canonical URL without retaining raw forge output.
 The bearings regression preserves that full wait while proving unrelated task detail remains capped.
 The brief regression separately pins that opening the PR remains direct-PR completion, that the worker performs one non-watching read only, that its timestamp comes from the Europe/Berlin zone command rather than model inference, and that its final visible output labels a pending external check without appending a worker pause.
 The DST regression sets the canonical status mtime to 2026-03-29 01:30 UTC and observes `2026-03-29 03:30 CEST`, proving Europe/Berlin zone rules rather than a fixed offset.

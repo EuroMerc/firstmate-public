@@ -1100,15 +1100,16 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
-# Shared by both the first-notification and already-notified paths below so
-# the retirement sequence (bin/fm-pr-lib.sh) is stated once.
-retire_merged_pr_poll() {  # <id>
-  local id=$1
-  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
+# Shared by definitive merged and closed paths so the identity-bound retirement
+# sequence (bin/fm-pr-lib.sh) is stated once. Recoverable red and unreadable
+# observations deliberately keep their poll.
+retire_terminal_pr_poll() {  # <id> <merged|closed>
+  local id=$1 result=$2
+  if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$result"; then
     fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-      || triage_log "merged PR poll retirement remains recoverable for $id"
+      || triage_log "$result PR poll retirement remains recoverable for $id"
   else
-    triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+    triage_log "$result PR poll retirement deferred because its canonical snapshot changed for $id"
   fi
 }
 
@@ -1232,7 +1233,7 @@ while :; do
       fi
       if [ "$is_pr_poll" -eq 1 ]; then
         case "$out" in
-          pending|pending$'\t'*|green|closed|failed|failed$'\t'*|unreadable)
+          pending|pending$'\t'*|empty|none|green|failed|failed$'\t'*|unreadable)
             if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
               "$STATE/$id.pr-poll-registration" "$out"; then
               reason="check: PR external-wait presentation failed for $id"
@@ -1240,6 +1241,18 @@ while :; do
               touch "$STATE/.last-check"
               wake "$reason"
             fi
+            touch "$STATE/.last-check"
+            continue
+            ;;
+          closed)
+            if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" closed; then
+              reason="check: PR external-wait presentation failed for $id"
+              fm_wake_append check "$c" "$reason" || exit 1
+              touch "$STATE/.last-check"
+              wake "$reason"
+            fi
+            retire_terminal_pr_poll "$id" closed
             touch "$STATE/.last-check"
             continue
             ;;
@@ -1268,7 +1281,7 @@ while :; do
           # identical detection is a no-op, not captain-facing progress
           # (AGENTS.md section 8): absorb it rather than enqueue another
           # main-blocking row, but still retire the poll so it stops firing.
-          retire_merged_pr_poll "$id"
+          retire_terminal_pr_poll "$id" merged
           triage_log "absorbed duplicate merged PR poll result for $id"
           touch "$STATE/.last-check"
           continue
@@ -1278,7 +1291,7 @@ while :; do
           fm_pr_poll_merge_mark_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number" \
             || triage_log "merge notification receipt could not be recorded for $id"
-          retire_merged_pr_poll "$id"
+          retire_terminal_pr_poll "$id" merged
         fi
         touch "$STATE/.last-check"
         wake "$reason"

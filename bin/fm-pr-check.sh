@@ -55,9 +55,15 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # every error by design, so a missing CLI would be indistinguishable from a
 # merge request that is never merged. Arming is the one point where that can be
 # reported, so the absent tool stops the watch here instead of watching nothing.
-if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
-  echo "error: watching a GitLab merge request requires glab on PATH" >&2
-  exit 1
+if [ "$PROVIDER" = gitlab ]; then
+  if ! command -v glab >/dev/null 2>&1; then
+    echo "error: watching a GitLab merge request requires glab on PATH" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a GitLab merge request requires jq on PATH" >&2
+    exit 1
+  fi
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
@@ -139,8 +145,9 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 
-# One immediate, non-watching observation makes only an already-pending
-# external check visible as soon as registration completes. A red or unreadable
+# One immediate, non-watching observation makes only an already-pending check,
+# or a GitHub empty rollup still inside its registration-age startup grace,
+# visible as soon as registration completes. A red or unreadable
 # first sample is left to the existing repeated watcher path, so a transient
 # forge condition cannot turn PR-open readiness into a durable failure. The
 # watcher runs the same static observer on its existing cadence; the shared
@@ -148,7 +155,7 @@ fm_pr_poll_publish_prepared || {
 OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
   "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER")
 case "$OBSERVATION" in
-  pending|pending$'\t'*)
+  pending|pending$'\t'*|empty)
     fm_external_wait_publish_pr "$STATE" "$ID" "$URL" \
       "$STATE/$ID.pr-poll-registration" "$OBSERVATION" || {
         echo "error: could not publish PR external-wait presentation" >&2

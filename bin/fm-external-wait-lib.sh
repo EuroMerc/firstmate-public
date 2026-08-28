@@ -16,11 +16,15 @@
 #                             <registration-file> <observation>
 #   Accept one observation from fm-pr-poll.sh --observe-validated:
 #     pending<TAB><optional comma-separated check names>
+#     empty (GitHub reported no checks; registration-age grace decides pending)
+#     none (GitLab definitively has no running pipeline)
 #     green
 #     merged
 #     closed
 #     failed<TAB><optional comma-separated failed check names>
 #     unreadable
+#   `empty` stays pending for FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS (default
+#   120) from the registration mtime, then becomes a truthful no-checks result.
 #   Append a standard paused/done/failed event only when its rendered state
 #   differs from the latest event. Sets FM_EXTERNAL_WAIT_CHANGED to 1 or 0 and
 #   FM_EXTERNAL_WAIT_DISPLAY to the captain-facing detail without the event
@@ -35,6 +39,7 @@ fi
 
 FM_EXTERNAL_WAIT_CHANGED=0
 FM_EXTERNAL_WAIT_DISPLAY=
+FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS_DEFAULT=120
 
 fm_external_wait_file_mtime() {  # <file>
   if [ "$(uname)" = Darwin ]; then
@@ -80,8 +85,25 @@ fm_external_wait_last_event() {  # <status-log>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
+fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
+  local log=$1 pause_verb=$2 url=$3 line
+  [ -f "$log" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$pause_verb: External check running | "*|"$pause_verb: External PR checks pending | "*)
+        case "$line" in *" | $url | "*) return 0 ;; esac
+        ;;
+      "failed: PR $url external checks failed"*|"failed: PR $url external check status unreadable")
+        return 0
+        ;;
+    esac
+  done < "$log"
+  return 1
+}
+
 fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <observation>
   local state=$1 id=$2 url=$3 registration=$4 observation=$5 kind names epoch since detail event log last pause_verb
+  local grace now age
   FM_EXTERNAL_WAIT_CHANGED=0
   FM_EXTERNAL_WAIT_DISPLAY=
   case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -94,6 +116,15 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
   kind=${observation%%$'\t'*}
   if [ "$observation" = "$kind" ]; then names=; else names=${observation#*$'\t'}; fi
   names=$(fm_external_wait_clean_names "$names")
+  if [ "$kind" = empty ]; then
+    grace=${FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS:-$FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS_DEFAULT}
+    case "$grace" in ''|*[!0-9]*) return 1 ;; esac
+    epoch=$(fm_external_wait_file_mtime "$registration") || return 1
+    now=$(date +%s) || return 1
+    age=$((now - epoch))
+    [ "$age" -ge 0 ] || age=0
+    if [ "$age" -lt "$grace" ]; then kind=pending; else kind=none; fi
+  fi
   case "$kind" in
     pending)
       epoch=$(fm_external_wait_file_mtime "$registration") || return 1
@@ -105,6 +136,10 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
       fi
       event="$pause_verb: $detail"
       ;;
+    none)
+      detail="PR $url no external checks reported"
+      event="done: $detail"
+      ;;
     green)
       detail="PR $url checks green"
       event="done: $detail"
@@ -112,11 +147,12 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
     merged)
       detail="PR $url merged"
       event="done: $detail"
-      # Merge clears only this PR's visible wait. A merge with no currently
-      # published wait continues through the existing merge-notification path
-      # without manufacturing another status transition.
-      case "$last" in "$pause_verb: "*) ;; *) FM_EXTERNAL_WAIT_DISPLAY=$detail; return 0 ;; esac
-      case "$last" in *" | $url | "*) ;; *) FM_EXTERNAL_WAIT_DISPLAY=$detail; return 0 ;; esac
+      # Merge clears any prior wait or recoverable failure this publisher
+      # emitted for the same canonical PR, even if another event followed it.
+      # A merge with no owned presentation continues through the existing merge
+      # notification path without manufacturing another status transition.
+      fm_external_wait_owned_pr_event_seen "$log" "$pause_verb" "$url" \
+        || { FM_EXTERNAL_WAIT_DISPLAY=$detail; return 0; }
       ;;
     closed)
       detail="PR $url closed before merge"
