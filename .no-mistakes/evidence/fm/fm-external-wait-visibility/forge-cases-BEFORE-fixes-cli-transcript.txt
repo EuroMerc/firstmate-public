@@ -1,0 +1,46 @@
+############ A. GitLab: a merge request GitLab has LOCKED while it processes the merge
+   (read successfully -> classified through its head pipeline, never an actionable 'unreadable')
+armed: state/task-a.check.sh
+cat: /tmp/fm-forge-cases-demo.j8lsfi/gitlab-locked/home/state/task-a.status: No such file or directory
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| task-a | unknown / none | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.j8lsfi/gitlab-locked/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+
+############ B. GitLab: a SKIPPED head pipeline is not merge-ready ...
+armed: state/task-a.check.sh
+   (a red first sample is left to the watcher, so arming alone stays silent)
+failed: PR https://gitlab.example/group/project/-/merge_requests/17 pipeline skipped, not merge-ready
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| task-a | failed / status-log | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.j8lsfi/gitlab-skipped/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+   ... and when the captain merges it anyway, the merge supersedes that red event:
+failed: PR https://gitlab.example/group/project/-/merge_requests/17 pipeline skipped, not merge-ready
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| task-a | failed / status-log | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.j8lsfi/gitlab-skipped/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+
+############ C. GitHub: a repository with NO checks configured (empty rollup)
+   startup grace = 2s: first read is a wait, after the grace it is a truthful
+   no-checks result, and every later read stays no-checks (no pending/no-checks flapping)
+External PR checks pending | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 19:01 CEST | worker finished and healthy
+armed: state/task-a.check.sh
+paused: External PR checks pending | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 19:01 CEST | worker finished and healthy
+after tick 1: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+after tick 2: paused: External PR checks pending | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 19:01 CEST | worker finished and healthy
+after tick 3: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+complete event log:
+paused: External PR checks pending | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 19:01 CEST | worker finished and healthy
+done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+paused: External PR checks pending | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 19:01 CEST | worker finished and healthy
+done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| task-a | done / status-log | ship | firstmate | tmux | present | https://github.com/kunchenguid/firstmate/pull/9 | /tmp/fm-forge-cases-demo.j8lsfi/github-empty/home/projects/wt | bin/fm-peek.sh fm-task-a |
+

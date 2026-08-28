@@ -1,0 +1,130 @@
+############ 1. Worker performs ONE non-watching check read (direct-PR contract)
+$ fm-pr-check.sh --observe-pending ship-task https://github.com/kunchenguid/firstmate/pull/9
+External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+armed: state/ship-task.check.sh
+
+--- state/ship-task.status (persistent captain-facing event log) ---
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+
+--- fm-crew-state.sh ship-task (reconciled current state) ---
+state: paused · source: status-log · External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+
+--- fm-fleet-view.sh (main-home fleet view) ---
+# Fleet View
+
+Schema: fm-fleet-snapshot.v1
+Home: /tmp/fm-external-wait-demo.3pzyJw/case/home
+
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| build-task | paused / status-log - External wait \| nightly image build on the shared runner \| since 2026-08-28 18:57 CEST \| worker healthy | ship | firstmate | tmux | present | - | /tmp/fm-external-wait-demo.3pzyJw/case/home/projects/ship-wt | bin/fm-peek.sh fm-build-task |
+| ship-task | paused / status-log - External check running \| build, integration tests \| https://github.com/kunchenguid/firstmate/pull/9 \| since 2026-08-28 18:57 CEST \| worker finished and healthy | ship | firstmate | tmux | present | https://github.com/kunchenguid/firstmate/pull/9 | /tmp/fm-external-wait-demo.3pzyJw/case/home/projects/ship-wt | bin/fm-peek.sh fm-ship-task |
+
+## Queued
+No queued backlog records found.
+
+## Done
+No done backlog records found.
+
+## Secondmates
+For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority.
+
+--- fm-bearings-snapshot.sh (Bearings, TOON default) ---
+schema: fm-bearings.v1
+home: case/home
+generated: "2026-08-28T16:57:14Z"
+prs: "not_requested (run: /bearings include PRs)"
+in_flight[2]{id,kind,state,doing}:
+  build-task,ship,paused,"External wait | nightly image build on the shared runner | since 2026-08-28 18:57 CEST | worker healthy"
+  ship-task,ship,paused,"External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy"
+secondmates: []
+decisions_open: []
+landed: []
+gates: []
+reports: []
+recorded_prs[1]{id,url}:
+  ship-task,"https://github.com/kunchenguid/firstmate/pull/9"
+omitted[7]{surface,reveal}:
+  backlog item bodies,"--fields bodies"
+  task paths,"--fields paths"
+  watch/steer actions,"--fields actions"
+  healthy endpoint detail,"--fields endpoints"
+  full scout-report inventory,"--all-reports"
+  superseded or prose-deferred queued items,"--all-queued"
+  live PR discovery + checks,"--include-prs"
+
+############ 2. Watcher tick: the forge head becomes known (unknown -> known binding)
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+==> binding the validated head did NOT restart the wait
+
+############ 3. Watcher tick: forge unreadable (transient read failure)
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+failed: PR https://github.com/kunchenguid/firstmate/pull/9 external check status unreadable
+
+############ 4. Watcher tick: same head still pending -> start time preserved, no duplicate wait
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+failed: PR https://github.com/kunchenguid/firstmate/pull/9 external check status unreadable
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+==> the resumed wait carries the ORIGINAL start (unreadable was a gap, not a new phase):
+    paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+
+--- fm-crew-state.sh ship-task after the unreadable gap ---
+state: paused · source: status-log · External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+
+############ 5. A proven NEW head (CI re-run) starts a NEW wait phase
+    (this step first lets the presented minute advance so the restart is visible)
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+failed: PR https://github.com/kunchenguid/firstmate/pull/9 external check status unreadable
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:58 CEST | worker finished and healthy
+
+--- fm-fleet-view.sh with the new phase ---
+# Fleet View
+
+Schema: fm-fleet-snapshot.v1
+Home: /tmp/fm-external-wait-demo.3pzyJw/case/home
+
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| build-task | paused / status-log - External wait \| nightly image build on the shared runner \| since 2026-08-28 18:57 CEST \| worker healthy | ship | firstmate | tmux | present | - | /tmp/fm-external-wait-demo.3pzyJw/case/home/projects/ship-wt | bin/fm-peek.sh fm-build-task |
+| ship-task | paused / status-log - External check running \| build, integration tests \| https://github.com/kunchenguid/firstmate/pull/9 \| since 2026-08-28 18:58 CEST \| worker finished and healthy | ship | firstmate | tmux | present | https://github.com/kunchenguid/firstmate/pull/9 | /tmp/fm-external-wait-demo.3pzyJw/case/home/projects/ship-wt | bin/fm-peek.sh fm-ship-task |
+
+## Queued
+No queued backlog records found.
+
+## Done
+No done backlog records found.
+
+## Secondmates
+For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority.
+
+############ 6. Watcher tick: the PR merges -> delivery event and identity-bound retirement
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+failed: PR https://github.com/kunchenguid/firstmate/pull/9 external check status unreadable
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:57 CEST | worker finished and healthy
+paused: External check running | build, integration tests | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 18:58 CEST | worker finished and healthy
+done: PR https://github.com/kunchenguid/firstmate/pull/9 merged
+poll registration present: no
+
+--- fm-fleet-view.sh after merge ---
+# Fleet View
+
+Schema: fm-fleet-snapshot.v1
+Home: /tmp/fm-external-wait-demo.3pzyJw/case/home
+
+## Under Way
+| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| build-task | paused / status-log - External wait \| nightly image build on the shared runner \| since 2026-08-28 18:57 CEST \| worker healthy | ship | firstmate | tmux | present | - | /tmp/fm-external-wait-demo.3pzyJw/case/home/projects/ship-wt | bin/fm-peek.sh fm-build-task |
+| ship-task | done / status-log | ship | firstmate | tmux | present | https://github.com/kunchenguid/firstmate/pull/9 | /tmp/fm-external-wait-demo.3pzyJw/case/home/projects/ship-wt | bin/fm-peek.sh fm-ship-task |
+
+## Queued
+No queued backlog records found.
+
+## Done
+No done backlog records found.
+
+## Secondmates
+For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority.

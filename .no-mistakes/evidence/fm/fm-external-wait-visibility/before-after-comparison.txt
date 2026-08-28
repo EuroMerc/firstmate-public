@@ -1,0 +1,34 @@
+Before/after contrast for this round's three publisher fixes.
+BEFORE = repository at commit 5683fad (bin/fm-external-wait-lib.sh + bin/fm-pr-poll.sh restored)
+AFTER  = branch head bdff196. Same demo script, same fake forge responses.
+
+=== A) GitLab merge request in the transient 'locked' state, pipeline running ===
+BEFORE: published nothing at arming (the state was classified 'unreadable', a red the
+        watcher owns), so the captain saw no wait:
+| task-a | unknown / none | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.j8lsfi/gitlab-locked/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+AFTER: the readable locked MR classifies through its head pipeline and renders as a wait:
+External check running | pipeline running | https://gitlab.example/group/project/-/merge_requests/17 | since 2026-08-28 19:00 CEST | worker finished and healthy
+paused: External check running | pipeline running | https://gitlab.example/group/project/-/merge_requests/17 | since 2026-08-28 19:00 CEST | worker finished and healthy
+| task-a | paused / status-log - External check running \| pipeline running \| https://gitlab.example/group/project/-/merge_requests/17 \| since 2026-08-28 19:00 CEST \| worker finished and healthy | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.ixtzCs/gitlab-locked/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+=== B) GitLab MR whose head pipeline was 'skipped', then merged by the captain ===
+BEFORE (last event stays red for a merged MR):
+failed: PR https://gitlab.example/group/project/-/merge_requests/17 pipeline skipped, not merge-ready
+| task-a | failed / status-log | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.j8lsfi/gitlab-skipped/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+AFTER (the merge supersedes the publisher's own skipped-pipeline failure):
+failed: PR https://gitlab.example/group/project/-/merge_requests/17 pipeline skipped, not merge-ready
+done: PR https://gitlab.example/group/project/-/merge_requests/17 merged
+| task-a | done / status-log | ship | firstmate | tmux | present | https://gitlab.example/group/project/-/merge_requests/17 | /tmp/fm-forge-cases-demo.ixtzCs/gitlab-skipped/home/projects/wt | bin/fm-peek.sh fm-task-a |
+
+=== C) GitHub PR in a repository with no checks (empty rollup), 2s startup grace ===
+BEFORE (pending / no-checks oscillate on every watcher tick - a captain wake each time):
+after tick 1: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+after tick 2: paused: External PR checks pending | https://github.com/kunchenguid/firstmate/pull/9 | since 2026-08-28 19:01 CEST | worker finished and healthy
+after tick 3: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+
+AFTER (the grace is one-way: it settles to no-checks and stays there):
+after tick 1: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+after tick 2: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
+after tick 3: done: PR https://github.com/kunchenguid/firstmate/pull/9 no external checks reported
