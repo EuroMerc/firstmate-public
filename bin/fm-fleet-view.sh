@@ -3,7 +3,8 @@
 #
 # This command intentionally does not parse fleet state itself.
 # It shells out to fm-fleet-snapshot.sh --json and renders that stable
-# structured contract for humans.
+# structured contract for humans. The Current cell stays token-tight except for
+# paused rows, whose external-wait detail must remain visibly persistent.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,8 +51,13 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   def action_of($t):
     if $t.kind == "secondmate" then "\($t.actions.send) - \($t.actions.watch)"
     else $t.actions.watch end;
+  def markdown($v): ($v // "") | gsub("\\|"; "\\|") | gsub("[\\r\\n]+"; " ");
+  def current_of($t):
+    "\($t.current_state.state) / \($t.current_state.source)" +
+    (if $t.current_state.state != "paused" or ($t.current_state.detail // "") == "" then ""
+     else " - \(markdown($t.current_state.detail))" end);
   def task_row($t):
-    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
+    "| \($t.id) | \(current_of($t)) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
   def blocker($r):
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by

@@ -983,6 +983,13 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' watcher-wake-lock
       ;;
+    bin/fm-external-wait-lib.sh)
+      # Shared by the validated PR transition, deterministic crew-state read,
+      # and structured fleet projection.
+      printf '%s\n' pr-forge
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' snapshot-bearings
+      ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge

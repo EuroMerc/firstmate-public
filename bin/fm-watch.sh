@@ -105,6 +105,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-external-wait-lib.sh
+. "$SCRIPT_DIR/fm-external-wait-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -1214,7 +1216,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
@@ -1227,6 +1229,21 @@ while :; do
           rejected_checks="$rejected_checks $c"
           continue
         fi
+      fi
+      if [ "$is_pr_poll" -eq 1 ]; then
+        case "$out" in
+          pending|pending$'\t'*|green|failed|failed$'\t'*|unreadable)
+            if ! fm_external_wait_publish_pr "$STATE" "$id" "$url" \
+              "$STATE/$id.pr-poll-registration" "$out"; then
+              reason="check: PR external-wait presentation failed for $id"
+              fm_wake_append check "$c" "$reason" || exit 1
+              touch "$STATE/.last-check"
+              wake "$reason"
+            fi
+            touch "$STATE/.last-check"
+            continue
+            ;;
+        esac
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"

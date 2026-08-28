@@ -301,6 +301,17 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
+  # shellcheck disable=SC2016 # Literal backticks are generated brief prose.
+  assert_grep 'make exactly one non-watching `gh-axi pr checks <number>` read' "$brief" \
+    "direct-PR brief did not request the one visible check observation"
+  assert_grep 'External check running | <concrete check names, or external PR checks pending when names are unavailable> | <full canonical PR URL> | since <Europe/Berlin local time with CET/CEST> | worker finished and healthy' "$brief" \
+    "direct-PR brief lost the cross-runtime final visible wait label"
+  # shellcheck disable=SC2016 # Literal backticks are generated brief prose.
+  assert_grep 'do not poll, do not append `paused:`' "$brief" \
+    "direct-PR visible wait label changed worker or polling ownership"
+  # shellcheck disable=SC2016 # Literal backticks and braces are generated brief prose.
+  assert_grep 'do not wait for checks before appending `done: PR {url}`' "$brief" \
+    "direct-PR readiness regressed from PR-open to checks-green"
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"

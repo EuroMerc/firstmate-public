@@ -59,7 +59,8 @@ During no-mistakes' `ci` monitor phase, it also reads the ci step log tail becau
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
-In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
+In that status-log fallback, a declared external wait reports the distinct `paused` state through `bin/fm-external-wait-lib.sh`'s persistent presentation, with its reason, Europe/Berlin start time derived from the status log mtime, and explicit healthy-worker label.
+A validated pending PR observation uses the same declared-wait event and presentation, derives its start time from the existing PR-poll registration mtime, and names concrete pending checks when the forge supplies them.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
@@ -257,6 +258,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Delivery modes are explicit per task
 
 `no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
+A direct-PR worker makes one non-watching check read for its final visible external-wait label and still reports completion immediately after opening the PR; the existing validated PR poll then owns silent unchanged observations, green continuation, failure escalation, and merge monitoring without another model turn or checker.
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.

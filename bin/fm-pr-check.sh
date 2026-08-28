@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-external-wait-lib.sh
+. "$SCRIPT_DIR/fm-external-wait-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -136,4 +138,23 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+
+# One immediate, non-watching observation makes an already-pending external
+# check visible as soon as registration completes. The watcher runs the same
+# static observer on its existing cadence; the shared publisher appends only a
+# changed transition, so an unchanged wait stays silent.
+OBSERVATION=$("$SCRIPT_DIR/fm-pr-poll.sh" --observe-validated \
+  "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER")
+case "$OBSERVATION" in
+  pending|pending$'\t'*|failed|failed$'\t'*|unreadable)
+    fm_external_wait_publish_pr "$STATE" "$ID" "$URL" \
+      "$STATE/$ID.pr-poll-registration" "$OBSERVATION" || {
+        echo "error: could not publish PR external-wait presentation" >&2
+        exit 1
+      }
+    if [ "$FM_EXTERNAL_WAIT_CHANGED" -eq 1 ]; then
+      printf '%s\n' "$FM_EXTERNAL_WAIT_DISPLAY"
+    fi
+    ;;
+esac
 printf 'armed: state/%s.check.sh\n' "$ID"

@@ -81,6 +81,14 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *" state,statusCheckRollup "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    if [ -n "${FM_TEST_GH_OBSERVATION:-}" ]; then
+      printf '%s\n' "$FM_TEST_GH_OBSERVATION"
+    elif [ "${FM_TEST_GH_STATE:-OPEN}" = MERGED ]; then
+      printf '%s\n' merged
+    fi
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -663,6 +671,76 @@ run_watcher_bounded() {
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+# The validated PR observer and the status publisher are exercised through the
+# registration and watcher entrypoints, never by matching implementation bytes.
+test_external_check_visible_transitions() {
+  local dir state url out rc count
+  url=https://github.com/o/r/pull/52
+
+  dir=$(make_case external-check-named)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tMigrationen + Testsuite, Browser smoke' \
+    run_check_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "named pending PR registration failed"
+  out=$(cat "$dir/arm.out")
+  assert_contains "$out" "External check running | Migrationen + Testsuite, Browser smoke | $url | since " \
+    "named pending checks were not visible at registration"
+  assert_contains "$out" " | worker finished and healthy" \
+    "named pending check did not include worker health"
+  grep -F "paused: External check running | Migrationen + Testsuite, Browser smoke | $url | since " \
+    "$state/task-a.status" >/dev/null || fail "named pending check was not durable current state"
+
+  # A repeated identical registration in the same presentation minute must not
+  # append another event. The registration mtime remains the canonical clock;
+  # display precision intentionally excludes seconds.
+  FM_TEST_GH_OBSERVATION=$'pending\tMigrationen + Testsuite, Browser smoke' \
+    run_check_entry "$dir" task-a "$url" > "$dir/rearm.out" 2> "$dir/rearm.err" \
+    || fail "unchanged pending PR re-registration failed"
+  count=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$count" -eq 1 ] || fail "unchanged pending check appended $count visible transitions"
+
+  FM_TEST_GH_OBSERVATION=green run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/green.out" 2> "$dir/green.err" || fail "green continuation watcher failed"
+  grep -qxF "done: PR $url checks green" "$state/task-a.status" \
+    || fail "green checks did not resume the existing ready delivery event"
+  assert_contains "$(cat "$dir/green.out")" "signal:" \
+    "green checks did not surface through the existing actionable status path"
+
+  dir=$(make_case external-check-unknown)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" \
+    > "$dir/arm.out" 2> "$dir/arm.err" || fail "unknown-name pending registration failed"
+  assert_contains "$(cat "$dir/arm.out")" "External PR checks pending | $url | since " \
+    "unknown-name pending checks invented or omitted a label"
+  assert_not_contains "$(cat "$dir/arm.out")" "External check running |  |" \
+    "unknown-name pending checks rendered an empty invented name"
+
+  FM_TEST_GH_OBSERVATION=$'failed\tMigrationen + Testsuite' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/failed.out" 2> "$dir/failed.err" \
+    || fail "failed-check watcher transition failed"
+  grep -qxF "failed: PR $url external checks failed | Migrationen + Testsuite" "$state/task-a.status" \
+    || fail "failed check did not become the existing actionable failure event"
+  assert_contains "$(cat "$dir/failed.out")" "signal:" \
+    "failed check did not escalate through the existing status path"
+
+  dir=$(make_case external-check-unreadable)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=pending run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "unreadable transition fixture did not arm"
+  set +e
+  FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/unreadable.out" 2> "$dir/unreadable.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "unreadable-check watcher transition failed: $(cat "$dir/unreadable.err")"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "unreadable terminal check did not become an actionable failure"
+  pass "validated PR checks present named/unknown waits once, then green or failure through existing delivery paths"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -3476,6 +3554,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_external_check_visible_transitions
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
