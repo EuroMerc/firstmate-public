@@ -42,7 +42,9 @@
 #   - a pending phase keeps its published start, and a startup grace keeps both
 #   its epoch and its remaining time. A structured observation proving a
 #   different head, or pending after any other publisher state, starts a new
-#   phase; an unknown head never does.
+#   phase; an unknown head never does. A proven different head starts its phase
+#   epoch at that observation even when the observation itself was unreadable,
+#   so the new head keeps its own startup grace and a truthful start.
 #   Append a standard paused/done/failed event only when its normalized
 #   registration-bound fingerprint changes (or a validated new head starts a
 #   phase), so an unrelated worker event and a silent same-head re-arm both keep
@@ -398,7 +400,7 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
       ;;
     unreadable)
       if [ "$head_changed" -eq 1 ]; then
-        next_epoch=0
+        next_epoch=$(date +%s) || return 1
       else
         next_epoch=$phase_epoch
         record_kind=$phase_kind

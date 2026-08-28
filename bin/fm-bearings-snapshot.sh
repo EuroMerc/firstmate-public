@@ -380,13 +380,18 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           doing:(if .bearings_state == "externally_held"
                     and (.bearings_external_wait_holds | length) > 0 then
                    ((.bearings_external_wait_holds | length) as $waits
+                    | ([ .bearings_holds[]?
+                         | select((.external_wait_detail | type) != "string") ]) as $plain_holds
+                    | ($plain_holds | length) as $plain
                     | [ (.bearings_external_wait_holds[:3][] | .id + ": " + .external_wait_detail),
                         (if $waits > 3 then
                            "+" + (($waits - 3) | tostring) + " more external waits"
                          else empty end),
-                        (.bearings_holds[]?
-                         | select((.external_wait_detail | type) != "string")
-                         | .id + ": " + ((.reason // "held") | trunc(120))) ]
+                        ($plain_holds[:3][]
+                         | .id + ": " + ((.reason // "held") | trunc(120))),
+                        (if $plain > 3 then
+                           "+" + (($plain - 3) | tostring) + " more holds"
+                         else empty end) ]
                     | join("; "))
                  else
                    ((if .bearings_state == "active_child_work" then

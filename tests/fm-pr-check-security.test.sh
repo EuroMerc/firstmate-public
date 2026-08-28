@@ -1104,6 +1104,7 @@ test_external_check_dedup_survives_worker_events() {
 # resets it, while unknown->known binds without resetting the running phase.
 test_external_check_head_bound_phase() {
   local dir state url first restarted today paused head1 head2 rollup1 rollup2 unknown_rollup
+  local head3 unknown_member empty_rollup
   url=https://github.com/o/r/pull/63
   head1=1111111111111111111111111111111111111111
   head2=2222222222222222222222222222222222222222
@@ -1160,6 +1161,33 @@ test_external_check_head_bound_phase() {
     *'since 2026-03-29 03:30 CEST'*) fail "proved new head kept the previous phase start: $restarted" ;;
     *" | since $today "*) ;;
     *) fail "proved new head did not publish a fresh canonical start: $restarted" ;;
+  esac
+  ack_watcher_cycle "$state" || fail "proved new-head wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A proven different head whose very first observation is unreadable still
+  # owns a startup grace: the head change was proven at that tick, so its phase
+  # epoch starts there instead of being discarded.
+  head3=3333333333333333333333333333333333333333
+  unknown_member=$(printf '{"state":"OPEN","headRefOid":"%s","statusCheckRollup":[{"__typename":"NotAKnownRollupType","name":"x"}]}' "$head3")
+  empty_rollup=$(printf '{"state":"OPEN","headRefOid":"%s","statusCheckRollup":[]}' "$head3")
+  FM_TEST_GH_ROLLUP="$unknown_member" FM_TEST_JQ="$REAL_JQ" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/u2.out" 2> "$dir/u2.err" \
+    || fail "new-head unreadable observation failed: $(cat "$dir/u2.err")"
+  grep -qxF "failed: PR $url external check status unreadable" "$state/task-a.status" \
+    || fail "an unrecognized rollup member on a proven new head was not publisher-owned"
+  ack_watcher_cycle "$state" || fail "new-head unreadable wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=1200 FM_TEST_GH_ROLLUP="$empty_rollup" \
+    FM_TEST_JQ="$REAL_JQ" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/e1.out" 2> "$dir/e1.err" \
+    || fail "new-head empty rollup after an unreadable tick failed: $(cat "$dir/e1.err")"
+  assert_no_grep "no external checks reported" "$state/task-a.status" \
+    "a head proven at an unreadable tick lost its empty-rollup startup grace"
+  restarted=$(fm_external_wait_last_status_line "$state/task-a.status")
+  case "$restarted" in
+    "paused: External PR checks pending | $url | since $today "*) ;;
+    *) fail "the new head's startup grace did not publish a truthful wait: $restarted" ;;
   esac
   pass "GitHub phase continuity follows validated head identity across unknown, re-arm, unreadable, and head change"
 }

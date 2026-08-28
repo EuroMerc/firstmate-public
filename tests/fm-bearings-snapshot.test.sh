@@ -998,6 +998,38 @@ EOF
       and (($doing | contains("mate-w4: ")) | not)
       and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
   ' >/dev/null || fail "many secondmate waits were neither bounded nor counted: $json"
+
+  # The ordinary holds beside a typed wait carry the same shape as the wait
+  # list: the first three under the per-hold cap, then their own remainder, so
+  # one row cannot grow without bound through the hold list either.
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    for extra in 2 3 4; do
+      printf -- '- [ ] mate-w%s - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$extra"
+    done
+    printf -- '- [ ] mate-b - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)\n'
+    for extra in 2 3 4; do
+      printf -- '- [ ] mate-b%s - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$extra"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for extra in 2 3 4; do
+    fm_write_meta "$mate/state/mate-b$extra.meta" \
+      "window=firstmate:fm-mate-b$extra" "worktree=$mate/projects/mate" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "mate-b$extra" idle
+    printf 'blocked: blocked by unresolved-dep-%s\n' "$extra" > "$mate/state/mate-b$extra.status"
+  done
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | contains("+1 more external waits"))
+      and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
+      and ($doing | contains("mate-b3: blocked by unresolved-dep-3"))
+      and (($doing | contains("mate-b4: ")) | not)
+      and ($doing | contains("+1 more holds"))
+  ' >/dev/null || fail "ordinary secondmate holds beside a typed wait were unbounded: $json"
   pass "bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows"
 }
 
