@@ -260,6 +260,58 @@ fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
   return 1
 }
 
+# 0 when the status-log line is one this publisher wrote for a validated
+# canonical PR URL. Provenance is the exact published form plus a URL that
+# re-parses to itself, never a label prefix, so a worker's own prose can never
+# be mistaken for a publisher event and the answer survives poll retirement.
+fm_external_wait_pr_event_is_publisher_owned() {  # <status-line>
+  local line=$1 pause_verb head url
+  pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  case "$line" in
+    "$pause_verb: External check running | "*" | worker finished and healthy"|\
+    "$pause_verb: External PR checks pending | "*" | worker finished and healthy")
+      case "$line" in *" | since "*) ;; *) return 1 ;; esac
+      head=${line%" | since "*}
+      url=${head##*" | "}
+      ;;
+    "done: PR "*|"failed: PR "*)
+      head=${line#*": PR "}
+      url=${head%% *}
+      case "$line" in
+        "done: PR $url merged"|"done: PR $url checks green"|\
+        "done: PR $url no external checks reported"|\
+        "failed: PR $url closed before merge"|\
+        "failed: PR $url external checks failed"|"failed: PR $url external checks failed | "*|\
+        "failed: PR $url external check status unreadable"|\
+        "failed: PR $url no pipeline reported, not merge-ready"|\
+        "failed: PR $url pipeline skipped, not merge-ready") ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  declare -F fm_pr_url_parse >/dev/null || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_URL" = "$url" ]
+}
+
+# The crew's own most recent status event, skipping every event this publisher
+# wrote for the task. A firstmate-published PR wait is presentation about the
+# forge, never evidence about what the pane's foreground call is doing, so the
+# watcher's declared-wait cadence must read the crew's own last declaration
+# rather than whichever line landed last.
+fm_external_wait_worker_last_status_line() {  # <status-log>
+  local f=$1 line match=
+  [ -e "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    fm_external_wait_pr_event_is_publisher_owned "$line" && continue
+    match=$line
+  done < "$f"
+  [ -n "$match" ] || return 0
+  printf '%s\n' "$match"
+}
+
 fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <observation>
   local state=$1 id=$2 url=$3 registration=$4 observation=$5 kind rest observed_head names
   local epoch since detail event log pause_verb grace now age owned_last signature record_kind

@@ -1768,6 +1768,57 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a lifted pause on an over-age busy pane no longer wedge-escalates"; }
   grep -F "possible wedge" "$out" >/dev/null || fail "the restored busy-turn escalation did not flag a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the restored busy-turn escalation"
+
+  # Phase D: firstmate's own PR-wait presentation lands AFTER the worker's own
+  # `working:` note on the same busy, over-age pane. That line is presentation
+  # about the forge, not evidence about this pane's foreground call, so it must
+  # not inherit the worker declaration's wedge exemption.
+  printf 'working: review closed, resuming the sweep\n' > "$statusf"
+  printf 'paused: External check running | build, lint | %s | since 2026-08-28 12:00 CEST | worker finished and healthy\n' \
+    'https://github.com/o/r/pull/52' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key" "$state/.paused-resurfaced-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a firstmate-published PR wait silenced the busy-turn escalation entirely: $(cat "$out")"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "a firstmate-published PR wait suppressed wedge detection for a live busy crew: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] \
+    || fail "a firstmate-published PR wait applied the declared-pause cadence to a busy pane"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the publisher-wait wedge escalation"
+
+  # And the crew's own declaration appended after that publisher line still
+  # absorbs, so the gate reads provenance rather than ignoring every paused line.
+  printf 'paused: hosting the Lavish review, awaiting captain feedback\n' >> "$statusf"
+  printf 'paused: External check running | build, lint | %s | since 2026-08-28 12:00 CEST | worker finished and healthy\n' \
+    'https://github.com/o/r/pull/52' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "a worker declaration behind a publisher wait was escalated: $(cat "$out")"; }
+  reap "$pid"
+  [ -e "$state/.paused-$key" ] \
+    || fail "a worker declaration behind a publisher wait lost the declared-pause cadence"
+  [ ! -e "$state/.stale-since-$key" ] \
+    || fail "a worker declaration behind a publisher wait started the wedge timer"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the provenance-gated declared pause"
   pass "a busy pane under a declared pause is rechecked on the long cadence, and lifting the pause restores the wedge escalation"
 }
 
