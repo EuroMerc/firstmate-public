@@ -22,23 +22,27 @@
 #   Accept one observation from fm-pr-poll.sh --observe-phase-validated, the
 #   production form that carries the validated forge head phase continuity
 #   needs (--observe-validated is the head-less diagnostic form, and an
-#   observation without a head can never bind or change a phase head):
-#     pending<TAB><optional comma-separated check names>
+#   observation without a head can never bind or change a phase head). Each
+#   observation is <kind>, optionally followed by <TAB><validated head or ->
+#   and <TAB><qualifier>:
+#     pending (qualifier: comma-separated pending check names)
 #     empty (GitHub reported no checks; registration-age grace decides pending)
 #     none (GitHub reported no checks once the startup grace expired)
-#     no-pipeline (GitLab has no head pipeline, so it is not merge-ready)
+#     no-pipeline (GitLab's head pipeline is absent, or `skipped` when the
+#       qualifier says so, and neither is merge-ready)
 #     green
 #     merged
 #     closed
-#     failed<TAB><optional comma-separated failed check names>
+#     failed (qualifier: comma-separated failed check names)
 #     unreadable
 #   `empty` stays pending for FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS (default
 #   120) from the registration mtime, then becomes a truthful no-checks result.
 #   An unreadable observation is a gap in reading the same check run rather than
 #   the end of a wait, so for the same head it keeps the interrupted phase whole
 #   - a pending phase keeps its published start, and a startup grace keeps both
-#   its epoch and its remaining time. A structured observation proving a different head, or pending after
-#   any other publisher state, starts a new phase; an unknown head never does.
+#   its epoch and its remaining time. A structured observation proving a
+#   different head, or pending after any other publisher state, starts a new
+#   phase; an unknown head never does.
 #   Append a standard paused/done/failed event only when its normalized
 #   registration-bound fingerprint changes (or a validated new head starts a
 #   phase), so an unrelated worker event and a silent same-head re-arm both keep

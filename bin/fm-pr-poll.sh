@@ -5,13 +5,15 @@
 # The watcher uses --observe-phase-validated with the same validated identity
 # to emit kind<TAB>validated-head-or--<TAB>optional-names. The diagnostic
 # --observe-validated form emits the same classification without the phase head.
-# Both forms emit one structural observation: merged, closed, green, empty, no-pipeline,
-# unreadable, or pending/failed plus sanitized concrete check names after one
-# tab when the forge supplies them. `empty` is a GitHub rollup whose startup
+# Both forms emit one structural observation: merged, closed, green, empty,
+# no-pipeline, unreadable, pending, or failed, plus a sanitized qualifier after
+# one tab when the forge supplies one (the diagnostic form keeps that qualifier
+# only for pending and failed). `empty` is a GitHub rollup whose startup
 # grace is decided from the existing registration timestamp by
-# bin/fm-external-wait-lib.sh; `no-pipeline` is a GitLab response with no head
-# pipeline, which firstmate's own merge path refuses, so it is reported as an
-# actionable not-merge-ready state rather than delivery readiness. A
+# bin/fm-external-wait-lib.sh; `no-pipeline` is a GitLab response whose head
+# pipeline is absent or `skipped` (the qualifier names which), and firstmate's
+# own merge path refuses both, so it is reported as an actionable
+# not-merge-ready state rather than delivery readiness. A
 # rollup member of an unrecognized type can never claim green: it reports
 # unreadable unless a readable member is already red or still running.
 # It never waits or loops; bin/fm-watch.sh owns cadence and the shared external-
