@@ -33,14 +33,21 @@ fm-lint.sh: full ShellCheck extended analysis enabled
 ok - fm-brief.sh: faster paths use configured authority without stacked review
 ok - no run + idle pane on a paused: status reports the visible external wait with its reason
 ok - worker-declared external wait renders Europe/Berlin daylight-saving time
+ok - a verbose worker-declared reason is bounded while required wait fields stay complete
+ok - an imitated PR wait label is bounded and labelled as a worker-declared wait
 ok - fleet snapshot and human view retain the current external-wait detail
-ok - bearings preserves complete main and secondmate external waits without unbounding unrelated rows
+ok - bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows
+ok - a captain_decision secondmate row renders only its narrowed hold set
 ok - validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths
+ok - an unchanged pending wait stays one transition with a stable start across worker events and re-arms
+ok - GitHub rollup payloads classify, bound and sanitize their observation through the real CLI parser
+ok - bounded multibyte forge check names stay valid UTF-8 in persistent state
 fm-doc-audience-check: ok surfaces=74 local_links=283
 ```
 
 The PR behavior regression covers the first-open observation opt-in, silent pre-merge-style re-arms, non-fatal presentation warnings after successful poll publication, a named pending check, a pending state without names, deterministic unchanged-wait deduplication, registration-age handling for an initially empty GitHub rollup, green continuation, merge clearing after an intervening recoverable failure, truthful closure and poll retirement, named failure escalation with continued monitoring, unreadable status escalation, structured GitLab `open`/`opened` and pipeline handling, and the full canonical URL without retaining raw forge output.
-The bearings regression preserves that full wait through both the main-home task row and the narrowly typed secondmate-home summary field while proving unrelated task and secondmate hold detail remains capped.
+The bearings regression preserves that full wait through both the main-home task row and the narrowly typed secondmate-home summary field while proving unrelated task and secondmate hold detail remains capped, that a mixed secondmate hold set still lists its non-wait holds, and that a captain-decision home renders only its own narrowed hold set.
+The presentation owner returns a value below its bound unchanged and, after a genuine cut, drops at most the one multibyte sequence the cut split, so a non-ASCII check name is identical under a byte-oriented and a character-aware locale; the parent additionally caps an ingested secondmate wait detail at 1200 characters, above the largest wait its own publisher can produce.
 The brief regression separately pins that opening the PR remains direct-PR completion, that the worker performs one non-watching read only, that its timestamp comes from the Europe/Berlin zone command rather than model inference, and that its final visible output labels a pending external check without appending a worker pause.
 The DST regression sets the canonical status mtime to 2026-03-29 01:30 UTC and observes `2026-03-29 03:30 CEST`, proving Europe/Berlin zone rules rather than a fixed offset.
 

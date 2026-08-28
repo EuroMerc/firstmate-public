@@ -949,6 +949,41 @@ EOF
   pass "bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows"
 }
 
+# A captain_decision home renders the narrowed backlog hold set. A typed
+# external wait on a hold that narrowing excluded must stay excluded rather than
+# reappearing through the external-wait branch.
+test_captain_decision_home_keeps_its_narrowed_hold_set() {
+  local home mate fakebin json wait
+  home=$(make_home captain-decision-holds); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  wait='External check running | build | https://github.com/kunchenguid/firstmate/pull/987 | since 2026-08-28 12:34 CEST | worker finished and healthy'
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-08-28)
+- [ ] mate-w - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+- [ ] mate-ext - Ordinary external hold (repo: firstmate) (kind: ship) (hold: vendor maintenance window) (hold-kind: external)
+
+## Done
+EOF
+  printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
+  fm_write_meta "$mate/state/mate-w.meta" \
+    "window=firstmate:fm-mate-w" "worktree=$mate/projects/mate" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-w idle
+  printf 'paused: %s\n' "$wait" > "$mate/state/mate-w.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates[] | select(.id == "mate")) as $m
+    | ($m.state == "externally_held")
+      and ($m.doing | contains("vendor maintenance window"))
+      and (($m.doing | contains("External check running")) | not)
+  ' >/dev/null || fail "a captain_decision home rendered a hold its own narrowing excluded: $json"
+  pass "a captain_decision secondmate row renders only its narrowed hold set"
+}
+
 test_default_is_bounded_and_local_only() {
   local home fakebin toon json
   home=$(make_home bounded); write_fixture "$home"
@@ -2023,6 +2058,7 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_external_wait_detail_stays_complete_without_unbounding_other_rows
+test_captain_decision_home_keeps_its_narrowed_hold_set
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges

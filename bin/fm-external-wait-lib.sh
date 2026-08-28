@@ -57,16 +57,44 @@ _FM_EXTERNAL_WAIT_UTF8_PROBE=$'\303\274'
 # Bound a display string to <max> characters without ever leaving a split
 # multibyte sequence in persistent state, whatever the ambient locale is.
 fm_external_wait_cut_display() {  # <text> <max-characters>
-  local text=$1 max=$2 byte
-  [ "${#text}" -le "$max" ] || text=${text:0:$max}
-  if [ "${#_FM_EXTERNAL_WAIT_UTF8_PROBE}" -ne 1 ]; then
-    while [ -n "$text" ]; do
-      byte=$(printf '%s' "${text: -1}" | od -An -tu1 | tr -d ' \n')
-      case "$byte" in ''|*[!0-9]*) break ;; esac
-      [ "$byte" -ge 128 ] || break
-      text=${text%?}
-      [ "$byte" -ge 192 ] && break
-    done
+  local text=$1 max=$2 byte probe expected drop
+  local lead='' trailing=0
+  # Below the bound the value is returned unchanged, so no locale can alter a
+  # string this owner did not truncate.
+  if [ "${#text}" -le "$max" ]; then
+    printf '%s' "$text"
+    return 0
+  fi
+  text=${text:0:$max}
+  if [ "${#_FM_EXTERNAL_WAIT_UTF8_PROBE}" -eq 1 ]; then
+    printf '%s' "$text"
+    return 0
+  fi
+  # The cut above counted bytes, so drop at most the one sequence it split.
+  probe=$text
+  while [ -n "$probe" ] && [ "$trailing" -le 3 ]; do
+    byte=$(printf '%s' "${probe: -1}" | od -An -tu1 | tr -d ' \n')
+    case "$byte" in ''|*[!0-9]*) break ;; esac
+    [ "$byte" -ge 128 ] || break
+    if [ "$byte" -ge 192 ]; then
+      lead=$byte
+      break
+    fi
+    trailing=$((trailing + 1))
+    probe=${probe%?}
+  done
+  if [ -n "$lead" ]; then
+    if [ "$lead" -ge 240 ]; then expected=4
+    elif [ "$lead" -ge 224 ]; then expected=3
+    else expected=2
+    fi
+    if [ "$((trailing + 1))" -ne "$expected" ]; then
+      drop=$((trailing + 1))
+      while [ "$drop" -gt 0 ] && [ -n "$text" ]; do
+        text=${text%?}
+        drop=$((drop - 1))
+      done
+    fi
   fi
   printf '%s' "$text"
 }

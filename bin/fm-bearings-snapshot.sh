@@ -355,10 +355,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold"
             and .deferred_marker != true)]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
+       | (if .current.state == "captain_decision" then $backlog_holds else (.holds // []) end) as $view_holds
        | . + {
            bearings_captain_holds:$captain_holds,
-           bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
-           bearings_external_wait_holds:[.holds[]? | select((.external_wait_detail | type) == "string")],
+           bearings_holds:$view_holds,
+           bearings_external_wait_holds:[$view_holds[] | select((.external_wait_detail | type) == "string")],
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"

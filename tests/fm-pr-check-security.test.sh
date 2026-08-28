@@ -1075,7 +1075,7 @@ test_github_rollup_classification() {
 # Forge names are bounded for presentation, and the persisted status event that
 # every jq-based projection re-reads must stay valid UTF-8.
 test_external_check_names_bound_is_utf8_safe() {
-  local dir state url name rollup
+  local dir state url name rollup short_case
   url=https://github.com/o/r/pull/62
   dir=$(make_case external-check-utf8-names)
   state="$dir/home/state"
@@ -1098,6 +1098,17 @@ test_external_check_names_bound_is_utf8_safe() {
            die "names segment exceeded its bound: " . length($names) . "\n" if length($names) > 600;' \
     "$state/task-a.status" \
     || fail "the published wait was cut mid-UTF-8 sequence or exceeded its name bound"
+  # Below the bound the name is passed through exactly, in a byte-oriented
+  # locale as much as in a character-aware one.
+  short_case=$(make_case external-check-utf8-short)
+  write_task_meta "$short_case"
+  LC_ALL=C FM_TEST_JQ="$REAL_JQ" \
+    FM_TEST_GH_ROLLUP='{"state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","name":"Prüfung café","status":"QUEUED"}]}' \
+    run_check_observe_entry "$short_case" task-a "$url" > "$short_case/arm.out" 2> "$short_case/arm.err" \
+    || fail "non-ASCII pending registration failed: $(cat "$short_case/arm.err")"
+  grep -qF "paused: External check running | Prüfung café | $url | since " \
+    "$short_case/home/state/task-a.status" \
+    || fail "a non-ASCII check name below the bound was altered: $(cat "$short_case/home/state/task-a.status")"
   pass "bounded multibyte forge check names stay valid UTF-8 in persistent state"
 }
 
