@@ -812,6 +812,44 @@ test_external_check_visible_transitions() {
     || fail "empty rollup stayed pending after its registration-age grace"
   assert_no_grep "checks green" "$state/task-a.status" \
     "empty GitHub rollup was mislabeled as green"
+  # A repository that never registers a check keeps reporting an empty rollup.
+  # The settled no-checks result is one-way: it must not re-enter the startup
+  # grace and oscillate back into a wait on every later tick.
+  ack_watcher_cycle "$state" || fail "no-checks wake acknowledgement failed"
+  rm -f "$state/.last-check"
+  # A settled no-checks result produces no further wake, so the cycle needs an
+  # unrelated custom check to end it rather than the PR observation itself.
+  add_stop_custom_check "$dir"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=600 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/no-checks-again.out" 2> "$dir/no-checks-again.err" \
+    || fail "repeated empty-rollup watcher failed: $(cat "$dir/no-checks-again.err")"
+  [ "$(grep -cxF "done: PR $url no external checks reported" "$state/task-a.status")" = 1 ] \
+    || fail "a settled empty rollup republished its no-checks event"
+  [ "$(grep -cF "paused: External PR checks pending | $url |" "$state/task-a.status")" = 1 ] \
+    || fail "a settled empty rollup re-entered the startup grace: $(cat "$state/task-a.status")"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" \
+    = "done: PR $url no external checks reported" ] \
+    || fail "a settled empty rollup oscillated back to a pending wait"
+
+  # An empty rollup observed after a same-head non-empty phase is a later
+  # publisher phase, not a fresh startup: it resolves to no-checks directly
+  # rather than opening a second grace window with a new start stamp.
+  dir=$(make_case external-check-empty-after-pending)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_check_observe_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "pending-then-empty fixture did not arm"
+  FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS=600 FM_TEST_GH_OBSERVATION=empty \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/empty-after-pending.out" 2> "$dir/empty-after-pending.err" \
+    || fail "empty-after-pending watcher failed: $(cat "$dir/empty-after-pending.err")"
+  [ "$(fm_external_wait_last_status_line "$state/task-a.status")" \
+    = "done: PR $url no external checks reported" ] \
+    || fail "an empty rollup after a same-head pending phase re-entered the startup grace: $(cat "$state/task-a.status")"
+  assert_no_grep "External PR checks pending | $url |" "$state/task-a.status" \
+    "an empty rollup after a same-head pending phase republished a startup wait"
 
   dir=$(make_case external-check-unknown)
   state="$dir/home/state"
@@ -3439,6 +3477,7 @@ SH
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
 test_gitlab_merge_watch() {
   local dir state out rc url value noglab nojq entry bindir name state_value
+  local skipped_dir skipped_state
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
@@ -3538,7 +3577,36 @@ group/subgroup/project
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "an absent GitLab pipeline retired its poll instead of staying under observation"
   ack_watcher_cycle "$state" || fail "no-pipeline wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
   rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
+
+  # A skipped head pipeline is published with the same publisher-owned red verb
+  # as an absent one, so a later merge of that merge request must supersede it.
+  # This runs in its own fixture so no other publisher-owned event can stand in
+  # for the skipped one when the merge decides what it owns.
+  skipped_dir=$(make_case gitlab-skipped-pipeline-merge)
+  skipped_state="$skipped_dir/home/state"
+  write_poll_meta "$skipped_state" task-a "$url"
+  fm_pr_poll_prepare "$skipped_state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare the skipped-pipeline GitLab poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the skipped-pipeline GitLab poll"
+  add_stop_custom_check "$skipped_dir"
+  FM_TEST_GLAB_STATE=open FM_TEST_GLAB_PIPELINE=skipped \
+    run_watcher_bounded "$skipped_dir/home" "$skipped_dir/fakebin" \
+    > "$skipped_dir/skipped.out" 2> "$skipped_dir/skipped.err" \
+    || fail "skipped-pipeline watcher transition failed: $(cat "$skipped_dir/skipped.err")"
+  [ "$(fm_external_wait_last_status_line "$skipped_state/task-a.status")" \
+    = "failed: PR $url pipeline skipped, not merge-ready" ] \
+    || fail "a skipped GitLab pipeline was not published as not merge-ready: $(cat "$skipped_state/task-a.status")"
+  ack_watcher_cycle "$skipped_state" || fail "skipped-pipeline wake acknowledgement failed"
+  rm -f "$skipped_state/.last-check"
+  FM_TEST_GLAB_STATE=merged run_watcher_bounded "$skipped_dir/home" "$skipped_dir/fakebin" \
+    > "$skipped_dir/skipped-merged.out" 2> "$skipped_dir/skipped-merged.err" \
+    || fail "merged watcher after a skipped pipeline failed: $(cat "$skipped_dir/skipped-merged.err")"
+  [ "$(fm_external_wait_last_status_line "$skipped_state/task-a.status")" = "done: PR $url merged" ] \
+    || fail "a merge did not supersede this publisher's skipped-pipeline failure: $(cat "$skipped_state/task-a.status")"
+  assert_poll_absent "$skipped_state" task-a
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git

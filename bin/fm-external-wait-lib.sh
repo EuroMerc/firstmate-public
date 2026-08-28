@@ -205,11 +205,9 @@ fm_external_wait_pr_event_signature() {  # <event-line>
 }
 
 # The most recent event this publisher wrote for this canonical PR, ignoring
-# any worker event that landed in between. With <ignore-unreadable> the
-# unreadable form is skipped, which yields the state the observed check run was
-# actually in rather than the last failed read of it.
-fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url> [ignore-unreadable]
-  local log=$1 pause_verb=$2 url=$3 ignore_unreadable=${4:-0} line match=
+# any worker event that landed in between.
+fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url>
+  local log=$1 pause_verb=$2 url=$3 line match=
   [ -f "$log" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -217,13 +215,14 @@ fm_external_wait_owned_pr_last_event() {  # <status-log> <pause-verb> <url> [ign
         case "$line" in *" | $url | "*) match=$line ;; esac
         ;;
       "failed: PR $url external check status unreadable")
-        [ "$ignore_unreadable" = 1 ] || match=$line
+        match=$line
         ;;
       "done: PR $url merged"|"done: PR $url checks green"|\
       "done: PR $url no external checks reported"|\
       "failed: PR $url closed before merge"|\
       "failed: PR $url external checks failed"|"failed: PR $url external checks failed | "*|\
-      "failed: PR $url no pipeline reported, not merge-ready")
+      "failed: PR $url no pipeline reported, not merge-ready"|\
+      "failed: PR $url pipeline skipped, not merge-ready")
         match=$line
         ;;
     esac
@@ -242,7 +241,8 @@ fm_external_wait_owned_pr_event_seen() {  # <status-log> <pause-verb> <url>
         ;;
       "failed: PR $url closed before merge"|\
       "failed: PR $url external checks failed"*|"failed: PR $url external check status unreadable"|\
-      "failed: PR $url no pipeline reported, not merge-ready")
+      "failed: PR $url no pipeline reported, not merge-ready"|\
+      "failed: PR $url pipeline skipped, not merge-ready")
         return 0
         ;;
     esac
@@ -270,7 +270,6 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
   phase_signature=$FM_PR_REG_PHASE_SIGNATURE
   pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   log="$state/$id.status"
-  owned_last=$(fm_external_wait_owned_pr_last_event "$log" "$pause_verb" "$url") || owned_last=
 
   kind=${observation%%$'\t'*}
   observed_head=-
@@ -304,21 +303,30 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
     grace=${FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS:-$FM_EXTERNAL_WAIT_CHECK_START_GRACE_SECS_DEFAULT}
     case "$grace" in ''|*[!0-9]*) return 1 ;; esac
     now=$(date +%s) || return 1
-    if [ "$head_changed" -eq 0 ] && [ "$phase_kind" = empty-pending ] && [ "$phase_epoch" -gt 0 ]; then
-      epoch=$phase_epoch
-    elif [ "$phase_kind" = unset ] && [ "$head_changed" -eq 0 ]; then
-      epoch=$(fm_external_wait_file_mtime "$registration") || return 1
-    else
+    # The startup grace is a one-way phase: it opens once per head and can only
+    # be re-entered by a proven different head, so a same-head rollup that has
+    # already resolved to no-checks stays no-checks instead of oscillating.
+    epoch=
+    if [ "$head_changed" -eq 1 ]; then
       epoch=$now
+    elif [ "$phase_kind" = empty-pending ] && [ "$phase_epoch" -gt 0 ]; then
+      epoch=$phase_epoch
+    elif [ "$phase_kind" = unset ]; then
+      epoch=$(fm_external_wait_file_mtime "$registration") || return 1
     fi
-    age=$((now - epoch))
-    [ "$age" -ge 0 ] || age=0
-    if [ "$age" -lt "$grace" ]; then
-      kind=pending
-      record_kind=empty-pending
-    else
+    if [ -z "$epoch" ]; then
       kind=none
       record_kind=none
+    else
+      age=$((now - epoch))
+      [ "$age" -ge 0 ] || age=0
+      if [ "$age" -lt "$grace" ]; then
+        kind=pending
+        record_kind=empty-pending
+      else
+        kind=none
+        record_kind=none
+      fi
     fi
   fi
 
@@ -407,6 +415,7 @@ fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <o
       ;;
   esac
 
+  owned_last=$(fm_external_wait_owned_pr_last_event "$log" "$pause_verb" "$url") || owned_last=
   if [ -n "$owned_last" ] && [ "$(fm_external_wait_pr_event_signature "$event")" \
       = "$(fm_external_wait_pr_event_signature "$owned_last")" ]; then
     # shellcheck disable=SC2034 # Caller reads the sourced library's result globals.
