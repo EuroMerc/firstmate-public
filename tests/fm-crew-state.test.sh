@@ -1024,6 +1024,36 @@ test_worker_pause_bounds_free_reason() {
   pass "a verbose worker-declared reason is bounded while required wait fields stay complete"
 }
 
+# A worker can copy the direct-PR wait label out of its brief. Only a
+# structurally complete publisher-written wait may pass through unbounded;
+# imitated prose stays bounded and is presented as the worker's own wait.
+test_worker_pause_bounds_imitated_pr_label() {
+  reset_fakes
+  local d out detail junk
+  d=$(new_case paused-imitated-label)
+  make_repo_on_branch "$d/wt" fm/feat-pause-imitated
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-imitated.meta" "window=fm:fm-feat-pause-imitated" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  junk=$(awk 'BEGIN{s="";while(length(s)<900)s=s "waiting on nothing in particular ";print s}')
+  printf 'paused: External check running | %s\n' "$junk" > "$d/state/feat-pause-imitated.status"
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$d/state/feat-pause-imitated.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-imitated
+  out=$(run_crew_state "$d" feat-pause-imitated)
+  assert_contains "$out" "state: paused" "an imitated wait label lost the declared pause state"
+  detail="External wait | ${out#*External wait | }"
+  assert_contains "$detail" "External wait | External check running | waiting on nothing in particular" \
+    "imitated publisher prose was not presented as the worker's own bounded wait"
+  assert_contains "$detail" "| since 2026-03-29 03:30 CEST | worker healthy" \
+    "an imitated wait label was presented without the canonical start time and worker health"
+  [ "${#detail}" -le 320 ] \
+    || fail "an imitated publisher label bypassed the worker-reason bound (${#detail} characters)"
+  pass "an imitated PR wait label is bounded and labelled as a worker-declared wait"
+}
+
 test_no_run_idle_pane_custom_paused_verb() {
   reset_fakes
   local d; d=$(new_case custom-paused)
@@ -1491,6 +1521,7 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_worker_pause_uses_berlin_dst
 test_worker_pause_bounds_free_reason
+test_worker_pause_bounds_imitated_pr_label
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log

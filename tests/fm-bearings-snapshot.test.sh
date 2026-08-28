@@ -922,7 +922,31 @@ EOF
     (.secondmates[] | select(.id == "mate") | .doing) as $doing
     | ($doing | endswith("…")) and (($doing | length) == 121)
   ' >/dev/null || fail "bearings unbounded an ordinary secondmate hold reason: $json"
-  pass "bearings preserves complete main and secondmate external waits without unbounding unrelated rows"
+
+  # A mixed hold set keeps the typed wait complete AND still reports every other
+  # hold under its own cap, rather than replacing the hold list.
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Wait for external checks (repo: firstmate) (kind: ship) (since 2026-08-28)
+- [ ] mate-b - Ordinary blocked work (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+  printf 'paused: %s\n' "$secondmate_wait" > "$mate/state/mate.status"
+  fm_write_meta "$mate/state/mate-b.meta" \
+    "window=firstmate:fm-mate-b" "worktree=$mate/projects/mate" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-b idle
+  printf 'blocked: blocked by unresolved-dep-7\n' > "$mate/state/mate-b.status"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg mate_wait "mate: $secondmate_wait" '
+    (.secondmates[] | select(.id == "mate") | .doing) as $doing
+    | ($doing | contains($mate_wait))
+      and ($doing | contains("mate-b: blocked by unresolved-dep-7"))
+  ' >/dev/null || fail "a typed secondmate wait hid an unrelated hold from bearings: $json"
+  pass "bearings preserves complete main and secondmate external waits without unbounding or dropping unrelated rows"
 }
 
 test_default_is_bounded_and_local_only() {

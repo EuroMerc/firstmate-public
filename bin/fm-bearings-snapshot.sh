@@ -377,7 +377,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id,state:.bearings_state,
           doing:(if .bearings_state == "externally_held"
                     and (.bearings_external_wait_holds | length) > 0 then
-                   ([.bearings_external_wait_holds[] | .id + ": " + .external_wait_detail] | join("; "))
+                   ([ (.bearings_external_wait_holds[] | .id + ": " + .external_wait_detail),
+                      (.bearings_holds[]?
+                       | select((.external_wait_detail | type) != "string")
+                       | .id + ": " + ((.reason // "held") | trunc(120))) ]
+                    | join("; "))
                  else
                    ((if .bearings_state == "active_child_work" then
                        ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))

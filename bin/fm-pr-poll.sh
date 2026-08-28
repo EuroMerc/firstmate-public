@@ -7,7 +7,9 @@
 # or pending/failed plus sanitized concrete check names after one tab when the
 # forge supplies them. `empty` is a GitHub rollup whose startup grace is decided
 # from the existing registration timestamp by bin/fm-external-wait-lib.sh;
-# `none` is a GitLab response that definitively has no running pipeline.
+# `none` is a GitLab response that definitively has no running pipeline. A
+# rollup member of an unrecognized type can never claim green: it reports
+# unreadable unless a readable member is already red or still running.
 # It never waits or loops; bin/fm-watch.sh owns cadence and the shared external-
 # wait presentation owner deduplicates unchanged observations.
 # The provider-tagged identity is data in the sidecar and is never interpolated
@@ -88,11 +90,12 @@ case "$provider" in
               {name:(.name // ""),
                pending:(.status != "COMPLETED"
                         or ((.conclusion // "") == "ACTION_REQUIRED")),
-               failed:(.status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","STARTUP_FAILURE","STALE")))}
+               failed:(.status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","STARTUP_FAILURE","STALE"))),
+               unknown:false}
             elif .__typename == "StatusContext" then
               {name:(.context // ""), pending:(.state == "PENDING" or .state == "EXPECTED"),
-               failed:((.state // "") | IN("ERROR","FAILURE"))}
-            else {name:"",pending:false,failed:false} end
+               failed:((.state // "") | IN("ERROR","FAILURE")), unknown:false}
+            else {name:"",pending:false,failed:false,unknown:true} end
         ] as $checks
       | def names($which):
           [$checks[] | select(.[$which]) | .name
@@ -103,6 +106,7 @@ case "$provider" in
       elif $pr == "CLOSED" then "closed"
       elif any($checks[]; .failed) then "failed\t" + names("failed")
       elif any($checks[]; .pending) then "pending\t" + names("pending")
+      elif any($checks[]; .unknown) then "unreadable"
       elif ($checks | length) == 0 then "empty"
       else "green" end
     ' 2>/dev/null) || { printf '%s\n' unreadable; exit 0; }

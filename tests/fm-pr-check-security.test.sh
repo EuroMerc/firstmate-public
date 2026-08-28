@@ -894,7 +894,70 @@ test_external_check_visible_transitions() {
     > "$dir/closed.out" 2> "$dir/closed.err" || fail "closed wait watcher failed"
   grep -qxF "failed: PR $url closed before merge" "$state/task-a.status" \
     || fail "closed PR was mislabeled as an external check failure"
+  assert_poll_absent "$state" task-a
   pass "validated PR checks present named/unknown waits once, then green, merge, closure, or failure through existing paths"
+}
+
+# An unchanged pending observation is one transition for the whole wait: an
+# unrelated worker event in between and a silent re-arm must not republish it,
+# and the published start must not move.
+test_external_check_dedup_survives_worker_events() {
+  local dir state url first paused
+  url=https://github.com/o/r/pull/61
+  dir=$(make_case external-check-dedup-owned)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent PR arming for the dedup fixture failed"
+  # 2026-03-29 01:30 UTC is 03:30 CEST, a start stamp no later re-arm can produce.
+  perl -e 'utime $ARGV[0], $ARGV[0], $ARGV[1] or die $!' 1774747800 \
+    "$state/task-a.pr-poll-registration"
+  add_stop_custom_check "$dir"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/first.out" 2> "$dir/first.err" \
+    || fail "first pending observation failed: $(cat "$dir/first.err")"
+  first="paused: External check running | build | $url | since 2026-03-29 03:30 CEST | worker finished and healthy"
+  grep -qxF "$first" "$state/task-a.status" \
+    || fail "the first pending observation did not publish its wait: $(cat "$state/task-a.status")"
+  ack_watcher_cycle "$state" || fail "first pending wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  printf 'working: adjusting review feedback\n' >> "$state/task-a.status"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/second.out" 2> "$dir/second.err" \
+    || fail "unchanged pending observation after a worker event failed"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 1 ] \
+    || fail "an unchanged pending check republished its wait after a worker event ($paused transitions)"
+  [ "$(tail -1 "$state/task-a.status")" = 'working: adjusting review feedback' ] \
+    || fail "an unchanged pending check overwrote the working crew's current state"
+  ack_watcher_cycle "$state" || fail "post-worker-event wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A silent re-arm rewrites the registration, so its mtime is now.
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "silent re-arm for the dedup fixture failed"
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/third.out" 2> "$dir/third.err" \
+    || fail "unchanged pending observation after a silent re-arm failed"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 1 ] \
+    || fail "a silent re-arm republished the unchanged wait ($paused transitions)"
+  grep -qxF "$first" "$state/task-a.status" \
+    || fail "a silent re-arm moved the published wait start"
+  ack_watcher_cycle "$state" || fail "post-re-arm wake acknowledgement failed"
+  rm -f "$state/.last-check"
+
+  # A genuinely changed check set is still one new transition, and it keeps the
+  # start the running wait was first published with.
+  FM_TEST_GH_OBSERVATION=$'pending\tbuild, lint' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/fourth.out" 2> "$dir/fourth.err" \
+    || fail "changed pending observation failed"
+  grep -qxF "paused: External check running | build, lint | $url | since 2026-03-29 03:30 CEST | worker finished and healthy" \
+    "$state/task-a.status" || fail "a changed pending check did not publish a truthful transition"
+  paused=$(grep -c '^paused: External check running |' "$state/task-a.status")
+  [ "$paused" -eq 2 ] || fail "a changed pending check produced $paused transitions"
+  pass "an unchanged pending wait stays one transition with a stable start across worker events and re-arms"
 }
 
 # The GitHub observer is exercised against forge-shaped statusCheckRollup
@@ -972,6 +1035,22 @@ test_github_rollup_classification() {
   [ "$out" = $'pending\tc1, c2, c3, c4, c5' ] \
     || fail "pending GitHub check names were not bounded to the first five, got: $out"
 
+  # A member the observer cannot read may never claim green.
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"FutureCheckThing","name":"mystery"}]}')
+  [ "$out" = unreadable ] \
+    || fail "an unrecognized rollup member was folded into a readable verdict, got: $out"
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+    {"__typename":"FutureCheckThing","name":"mystery"}]}')
+  [ "$out" = unreadable ] \
+    || fail "an unrecognized rollup member next to a passed check claimed green, got: $out"
+  out=$(observe_rollup '{"state":"OPEN","statusCheckRollup":[
+    {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
+    {"__typename":"FutureCheckThing","name":"mystery"}]}')
+  [ "$out" = $'failed\tunit' ] \
+    || fail "an unrecognized rollup member masked a readable red check, got: $out"
+
   out=$(observe_rollup '{"state":"MERGED","statusCheckRollup":[
     {"__typename":"CheckRun","name":"unit","status":"IN_PROGRESS","conclusion":null}]}')
   [ "$out" = merged ] || fail "a merged GitHub PR was not terminal, got: $out"
@@ -991,6 +1070,35 @@ test_github_rollup_classification() {
   assert_no_grep '__typename' "$dir/home/state/task-a.status" \
     "raw forge payload fields reached durable fleet state"
   pass "GitHub rollup payloads classify, bound and sanitize their observation through the real CLI parser"
+}
+
+# Forge names are bounded for presentation, and the persisted status event that
+# every jq-based projection re-reads must stay valid UTF-8.
+test_external_check_names_bound_is_utf8_safe() {
+  local dir state url name rollup
+  url=https://github.com/o/r/pull/62
+  dir=$(make_case external-check-utf8-names)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  name=$(awk 'BEGIN{s="";while(length(s)<120)s=s "ü";print s}')
+  rollup=$(printf '{"state":"OPEN","statusCheckRollup":[')
+  for _ in 1 2 3 4 5; do
+    rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"QUEUED\"},"
+  done
+  rollup="${rollup%,}]}"
+  FM_TEST_JQ="$REAL_JQ" FM_TEST_GH_ROLLUP="$rollup" \
+    run_check_observe_entry "$dir" task-a "$url" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "multibyte-named pending registration failed: $(cat "$dir/arm.err")"
+  grep -q '^paused: External check running | ' "$state/task-a.status" \
+    || fail "multibyte pending names did not publish a wait: $(cat "$state/task-a.status")"
+  perl -e 'use Encode; open my $fh, "<:raw", $ARGV[0] or die $!; local $/; my $d = <$fh>;
+           my $t = Encode::decode("UTF-8", $d, Encode::FB_CROAK);
+           my ($names) = $t =~ /^paused: External check running \| (.*?) \| https/m;
+           die "no names segment\n" unless defined $names;
+           die "names segment exceeded its bound: " . length($names) . "\n" if length($names) > 600;' \
+    "$state/task-a.status" \
+    || fail "the published wait was cut mid-UTF-8 sequence or exceeded its name bound"
+  pass "bounded multibyte forge check names stay valid UTF-8 in persistent state"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -3887,7 +3995,9 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_external_check_visible_transitions
+test_external_check_dedup_survives_worker_events
 test_github_rollup_classification
+test_external_check_names_bound_is_utf8_safe
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
