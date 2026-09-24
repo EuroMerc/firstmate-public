@@ -1171,6 +1171,55 @@ test_live_declared_pause_pane_churn_does_not_resurface() {
   pass "a live declared pause surfaces once and pane churn below the re-surface threshold queues no further wake"
 }
 
+# A busy pane past the completed-turn bound absorbs its declared wait silently,
+# so that absorb must not count as the one first-sight surface: once the long
+# call ends and the live agent idles at a fresh render, the wait still surfaces.
+test_busy_bound_absorbed_pause_still_surfaces_once_idle() {
+  local dir state fakebin out capture_file statusf window key sig pid wakes
+  dir=$(make_case busy-bound-then-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/grill.status"
+  window="test:fm-grill"
+  printf 'Working... (7200.4s) long foreground call' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\n' "$window" > "$state/grill.meta"
+  record_pi_busy "$state" grill
+  printf 'paused: round 4 is posted, waiting on the answers\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-grill_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/grill.meta"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the busy-bound declared pause surfaced before the pane idled: $(cat "$out")"; }
+  reap "$pid"
+  [ -e "$state/.paused-$key" ] || fail "the busy-turn bound did not absorb the declared pause"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "the silent busy-bound absorb recorded a surface it never queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy-bound phase stop"
+
+  # The long call ends: the live agent idles at a fresh render, the declaration
+  # and its age, well below the re-surface threshold, unchanged.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" grill idle --current-gen \
+    --source pi-ext --event agent-end
+  printf 'idle, waiting on the captain' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · round 4 is posted, waiting on the answers' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a live declared pause the busy bound absorbed never got its first-sight surface once idle"; }
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "expected exactly one stale wake for the idle declared pause, got $wakes: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the first-sight surface did not record the re-surface throttle"
+  pass "a declared pause the busy bound absorbed silently still surfaces once when the live pane idles"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2752,6 +2801,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_live_declared_pause_pane_churn_does_not_resurface
+test_busy_bound_absorbed_pause_still_surfaces_once_idle
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

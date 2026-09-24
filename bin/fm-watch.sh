@@ -1541,14 +1541,16 @@ EOF
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held \
         "$(fm_external_wait_worker_last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        # A live declared wait already surfaced once owns the bounded cadence
-        # through the flag, exactly as the stable-hash branch treats it; clearing
-        # it here would let an idle render change re-open first sight and queue
-        # the same wait again on every churn.
+        # A live declared wait already surfaced once owns the bounded cadence,
+        # exactly as the stable-hash branch treats it; clearing it here would let
+        # an idle render change re-open first sight and queue the same wait again
+        # on every churn. Only a real surface or re-surface writes the
+        # .paused-resurfaced- marker, so a wait the busy-bound path absorbed
+        # silently still gets its one first-sight surface once the pane idles.
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           working) clear_pause_tracking "$key" ;;
-          *)      if [ -e "$pf" ]; then handle_paused_stale "$w" "$task" "$h"; else clear_pause_tracking "$key"; fi ;;
+          *)      if [ -e "$STATE/.paused-resurfaced-$key" ]; then handle_paused_stale "$w" "$task" "$h"; else clear_pause_tracking "$key"; fi ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
