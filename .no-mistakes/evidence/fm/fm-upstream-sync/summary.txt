@@ -1,0 +1,16 @@
+fm-ci-workflow exit=1
+fm-lint-workflows exit=0
+fm-dod-lib exit=0
+fm-fleet-ledger exit=1
+fm-bearings-snapshot exit=1
+fm-afk-contract exit=0
+fm-brief exit=0
+fm-backend exit=0
+fm-afk-launch exit=0
+fm-fleet-snapshot-view exit=0
+fm-daemon exit=0
+fm-afk-return exit=0
+fm-crew-state exit=0
+fm-watch-triage exit=124
+fm-pr-check-security exit=124
+fm-public-followup exit=124

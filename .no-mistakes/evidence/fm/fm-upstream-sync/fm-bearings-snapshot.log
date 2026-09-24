@@ -1,0 +1,4 @@
+ok - task teardown during metadata capture is omitted without aborting the snapshot
+ok - current state and decision hints share one captured status observation
+ok - reused live state is discarded when task generation changes
+not ok - concurrent local snapshot never began a current-state read

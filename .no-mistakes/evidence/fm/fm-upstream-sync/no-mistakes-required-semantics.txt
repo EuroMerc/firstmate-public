@@ -1,0 +1,6 @@
+triggers: ['opened', 'edited', 'reopened'] branches: ['main']
+permissions: {'contents': 'read', 'pull-requests': 'read'}
+job if: github.event.pull_request.user.login != 'github-actions[bot]' && github.event.pull_request.user.login != 'dependabot[bot]'
+uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970
+with: {'exempt-authors': 'kunchenguid'}
+ASSERTIONS PASSED

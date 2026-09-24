@@ -1,0 +1,5 @@
+ok - workflow and pinned shared action use opened, edited, and reopened
+ok - existing PR pushes do not pin a stale-body failure before edited validates the new head
+ok - shared action accepts a matching head_sha with completed required steps
+ok - shared action rejects a mismatched head_sha and names both SHAs
+ok - shared action rejects an attestation with no head_sha

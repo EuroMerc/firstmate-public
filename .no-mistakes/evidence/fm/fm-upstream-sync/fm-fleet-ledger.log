@@ -1,0 +1,3 @@
+not ok - the watcher poll did not record the status lines (missing: '"state":"needs-decision"')
+--- output ---
+{"v":1,"ts":1790248322,"event":"task.dispatched","task":"on-lifecycle-t1","kind":"ship","project":"sample","harness":"claude","model":null}
