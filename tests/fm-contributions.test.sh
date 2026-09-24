@@ -121,6 +121,8 @@ set -eu
 case "$*" in
   'pr view '*headRefOid,reviewDecision*)
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
+  # The PR poll's observation query; its answer mirrors the green check-run fixture.
+  'pr view '*statusCheckRollup*) printf 'green\t%s\t\n' "$(cat "$FORGE/head")" ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8')
@@ -507,7 +509,14 @@ test_watcher_surfaces_new_contribution_once() {
   rc=0
   with_home "$home" env FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$home/watcher-repeat.out" 2> "$home/watcher-repeat.err" || rc=$?
-  [ "$rc" -eq 124 ] || fail "an already durable contribution signal re-rang the watcher: $(cat "$home/watcher-repeat.out")"
+  # The PR poll presents its first forge observation in the delivery status log,
+  # which is a status signal of its own; only a contribution re-ring is a failure.
+  case "$rc:$(cat "$home/watcher-repeat.out")" in
+    124:*|"0:signal: $home/state/delivery.status"*) ;;
+    *) fail "an already durable contribution signal re-rang the watcher: $(cat "$home/watcher-repeat.out")" ;;
+  esac
+  ! grep -q '^check: contributions' "$home/watcher-repeat.out" \
+    || fail "an already durable contribution signal re-rang the watcher: $(cat "$home/watcher-repeat.out")"
   rows=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$home/state/.wake-queue")
   [ "$rows" = 1 ] || fail "repeat contribution observation created $rows durable check wakes"
   pass 'watcher surfaces one newly durable contribution signal without re-ringing it'

@@ -23,6 +23,14 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
 fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
+
+# Record a live pid's identity through the lock owner's own helper. It runs in a
+# child bash rather than a sourced subshell so ShellCheck's dataflow does not
+# treat the wake library's assignments as subshell-local for the whole file.
+daemon_test_pid_identity() {  # <pid>
+  bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+}
+
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
@@ -162,7 +170,7 @@ test_afk_start_refresh_reports_a_live_daemon_before_judging_the_launch() {
   sleep 30 & sleeper_pid=$!
   mkdir -p "$case_state/.supervise-daemon.lock"
   printf '%s' "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity" )
+  daemon_test_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity"
 
   out=$(PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=default:w1:p1 \
@@ -193,7 +201,7 @@ test_afk_start_revalidates_live_daemon_before_refresh_success() {
   sleep 30 & sleeper_pid=$!
   mkdir -p "$case_state/.supervise-daemon.lock" "$case_state/.cursor-park-owner.lock"
   printf '%s' "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity" )
+  daemon_test_pid_identity "$sleeper_pid" > "$case_state/.supervise-daemon.lock/pid-identity"
   printf '%s' "$$" > "$case_state/.cursor-park-owner.lock/pid"
 
   PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_state" \
@@ -255,7 +263,7 @@ test_afk_start_prepared_entry_revalidates_live_daemon_before_refresh_success() {
   case_lock="$case_state/.supervise-daemon.lock"
   date '+%s' > "$case_state/.afk"
   sleep 30 & sleeper_pid=$!
-  identity=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" )
+  identity=$(daemon_test_pid_identity "$sleeper_pid")
   mkdir -p "$case_lock"
   printf '%s' "$sleeper_pid" > "$case_lock/pid"
   mkfifo "$case_lock/pid-identity"
