@@ -13,7 +13,7 @@ A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and 
 The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
 It evaluates every PR opening, body edit, and reopening independently, and prevents a later edit from replacing an earlier pending compliance check.
 After head synchronization, the check waits for no-mistakes' subsequent body update, so it never compares the prior body's head-bound attestation with the newly pushed head.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
+GitHub Actions and Dependabot are exempt so their automation keeps working, and the workflow's `exempt-authors` input exempts the maintainer's own PRs, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
 ## Workflow
 
