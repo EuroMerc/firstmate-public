@@ -299,17 +299,17 @@ fm_external_wait_pr_event_is_publisher_owned() {  # <status-line>
 # wrote for the task. A firstmate-published PR wait is presentation about the
 # forge, never evidence about what the pane's foreground call is doing, so the
 # watcher's declared-wait cadence must read the crew's own last declaration
-# rather than whichever line landed last.
+# rather than whichever line landed last. Apart from that filter it is exactly
+# last_status_line's event read (bin/fm-classify-lib.sh), so continuation prose
+# and blank lines are skipped the same way. It reads the whole log, because a
+# run of publisher events can fill any bounded tail.
 fm_external_wait_worker_last_status_line() {  # <status-log>
-  local f=$1 line match=
-  [ -e "$f" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    fm_external_wait_pr_event_is_publisher_owned "$line" && continue
-    match=$line
-  done < "$f"
-  [ -n "$match" ] || return 0
-  printf '%s\n' "$match"
+  local f=$1 line scan
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  scan=$(while IFS= read -r line || [ -n "$line" ]; do
+      fm_external_wait_pr_event_is_publisher_owned "$line" || printf '%s\n' "$line"
+    done < "$f" | _fm_status_event_scan) || :
+  printf '%s\n' "${scan##*$'\n'}"
 }
 
 fm_external_wait_publish_pr() {  # <state-dir> <task-id> <url> <registration> <observation>
