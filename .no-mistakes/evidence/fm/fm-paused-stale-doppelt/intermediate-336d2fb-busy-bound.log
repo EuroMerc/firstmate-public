@@ -1,0 +1,3 @@
+== test_busy_bound_absorbed_pause_still_surfaces_once_idle (intermediate 336d2fb watcher, gated on .paused-)
+not ok - a live declared pause the busy bound absorbed never got its first-sight surface once idle
+exit=1

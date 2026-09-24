@@ -1,0 +1,10 @@
+== test_live_declared_pause_pane_churn_does_not_resurface (base 81bc7a6 watcher)
+not ok - a live declared pause below the re-surface threshold re-surfaced 1 times on pane churn: stale: test:fm-grill
+stale: test:fm-grill
+exit=1
+== test_busy_bound_absorbed_pause_still_surfaces_once_idle (base 81bc7a6 watcher)
+ok - a declared pause the busy bound absorbed silently still surfaces once when the live pane idles
+exit=0
+== test_exited_declared_pause_is_bounded_but_live_gate_surfaces (base 81bc7a6 watcher)
+ok - exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once
+exit=0

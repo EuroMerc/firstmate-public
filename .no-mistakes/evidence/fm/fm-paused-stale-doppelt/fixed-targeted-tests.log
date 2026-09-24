@@ -1,0 +1,11 @@
+ok - a live declared pause surfaces once and pane churn below the re-surface threshold queues no further wake
+ok - a declared pause the busy bound absorbed silently still surfaces once when the live pane idles
+ok - exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once
+ok - a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated
+ok - a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)
+ok - a busy pane under a declared pause is rechecked on the long cadence, and lifting the pause restores the wedge escalation
+ok - unchanged stale hashes reclassify when a crew enters or leaves pause
+ok - a resumed secondmate clears pause and stale tracking before stale exemption
+ok - AFK changed paused panes hand off plain stale identities for daemon-owned pause triage
+ok - a declared pause is periodically rechecked against authoritative active-run state
+ok - a paused status overridden by authoritative working preserves its wedge timer and escalates
